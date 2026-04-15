@@ -31,6 +31,7 @@ from tools.delegate_tool import (
     _build_child_system_prompt,
     _strip_blocked_tools,
     _resolve_child_credential_pool,
+    _resolve_child_model_and_provider,
     _resolve_delegation_credentials,
 )
 
@@ -368,6 +369,31 @@ class TestDelegateTask(unittest.TestCase):
             self.assertEqual(kwargs["api_key"], parent.api_key)
             self.assertEqual(kwargs["provider"], parent.provider)
             self.assertEqual(kwargs["api_mode"], parent.api_mode)
+
+    @patch("hermes_cli.config.load_config")
+    def test_child_resolves_blank_parent_model_and_provider_from_config(self, mock_load_config):
+        parent = _make_mock_parent(depth=0)
+        parent.base_url = "https://api.minimax.io/v1/"
+        parent.model = ""
+        parent.provider = ""
+
+        mock_load_config.return_value = {
+            "model": {
+                "default": "MiniMax-M2.7",
+                "provider": "minimax",
+                "base_url": "https://api.minimax.io/v1",
+            }
+        }
+
+        model, provider = _resolve_child_model_and_provider(
+            requested_model=None,
+            override_provider=None,
+            override_base_url=parent.base_url,
+            parent_agent=parent,
+        )
+
+        self.assertEqual(model, "MiniMax-M2.7")
+        self.assertEqual(provider, "minimax")
 
     def test_child_inherits_parent_print_fn(self):
         parent = _make_mock_parent(depth=0)

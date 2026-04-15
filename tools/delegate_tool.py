@@ -560,6 +560,73 @@ _LEGACY_EVENT_MAP: Dict[str, DelegateEvent] = {
     "subagent_progress": DelegateEvent.TASK_PROGRESS,
 }
 
+def _infer_provider_from_base_url(base_url: Optional[str]) -> Optional[str]:
+    """Best-effort provider inference from a resolved base_url."""
+    normalized = (base_url or "").strip().lower().rstrip("/")
+    if not normalized:
+        return None
+    if "minimax.io" in normalized:
+        return "minimax"
+    if "openrouter" in normalized:
+        return "openrouter"
+    if "chatgpt.com/backend-api/codex" in normalized or "api.openai.com" in normalized:
+        return "openai-codex"
+    if "api.anthropic.com" in normalized or normalized.endswith("/anthropic"):
+        return "anthropic"
+    if "api.z.ai" in normalized:
+        return "zai"
+    return None
+
+
+def _resolve_child_model_and_provider(
+    *,
+    requested_model: Optional[str],
+    override_provider: Optional[str],
+    override_base_url: Optional[str],
+    parent_agent,
+) -> tuple[str, str]:
+    """Resolve effective child model/provider robustly.
+
+    Parent agents created by some entry points can have a live client/base_url but
+    leave ``parent_agent.model`` / ``parent_agent.provider`` blank.  Subagents must
+    not inherit those blanks, otherwise they send requests with ``model=''``.
+    """
+    effective_model = (requested_model or getattr(parent_agent, "model", "") or "").strip()
+    effective_provider = (override_provider or getattr(parent_agent, "provider", "") or "").strip().lower()
+
+    full_cfg = {}
+    try:
+        from hermes_cli.config import load_config
+        full_cfg = load_config() or {}
+    except Exception:
+        full_cfg = {}
+
+    model_cfg = full_cfg.get("model", {}) if isinstance(full_cfg, dict) else {}
+    if not isinstance(model_cfg, dict):
+        model_cfg = {"default": str(model_cfg or "")}
+
+    cfg_model = str(model_cfg.get("default") or model_cfg.get("model") or "").strip()
+    cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+
+    if not effective_provider:
+        effective_provider = (
+            _infer_provider_from_base_url(override_base_url or getattr(parent_agent, "base_url", ""))
+            or cfg_provider
+            or ""
+        )
+
+    if not effective_model:
+        effective_model = cfg_model
+
+    if not effective_model and effective_provider:
+        try:
+            from hermes_cli.models import get_default_model_for_provider
+            effective_model = str(get_default_model_for_provider(effective_provider) or "").strip()
+        except Exception:
+            pass
+
+    return effective_model, effective_provider
+
 
 def check_delegate_requirements() -> bool:
     """Delegation has no external requirements -- always available."""
@@ -1017,10 +1084,16 @@ def _build_child_agent(
 
         child_thinking_cb = _child_thinking
 
-    # Resolve effective credentials: config override > parent inherit
-    effective_model = model or parent_agent.model
-    effective_provider = override_provider or getattr(parent_agent, "provider", None)
+    # Resolve effective credentials: config override > parent inherit.
+    # Important: parent_agent.model/provider may be blank even when the parent is
+    # live and authenticated via runtime provider resolution. Resolve robustly.
     effective_base_url = override_base_url or parent_agent.base_url
+    effective_model, effective_provider = _resolve_child_model_and_provider(
+        requested_model=model,
+        override_provider=override_provider,
+        override_base_url=effective_base_url,
+        parent_agent=parent_agent,
+    )
     effective_api_key = override_api_key or parent_api_key
     # Bug #20558 / PR #20563: api_mode must NOT be inherited when the child uses a
     # different provider than the parent — each provider has its own API surface
