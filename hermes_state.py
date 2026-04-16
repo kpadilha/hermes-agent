@@ -29,6 +29,30 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+
+def _filter_replayable_codex_reasoning_items(items: Any) -> Optional[List[Dict[str, Any]]]:
+    """Drop persisted Codex reasoning items known to poison future replay.
+
+    `rs_tmp_*` ids come from transient/incomplete backend states and have been
+    observed to fail with `invalid_encrypted_content` when replayed in later
+    turns. Keep everything else intact to preserve existing transcript rewrite
+    semantics; stricter replay validation belongs at the actual replay site.
+    """
+    if not isinstance(items, list):
+        return None
+
+    filtered: List[Dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id.startswith("rs_tmp_"):
+            logger.warning("Dropping contaminated Codex reasoning item from replay history: %s", item_id)
+            continue
+        filtered.append(item)
+
+    return filtered or None
+
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
 SCHEMA_VERSION = 6
@@ -923,10 +947,13 @@ class SessionDB:
                         msg["reasoning_details"] = None
                 if row["codex_reasoning_items"]:
                     try:
-                        msg["codex_reasoning_items"] = json.loads(row["codex_reasoning_items"])
+                        restored_items = json.loads(row["codex_reasoning_items"])
                     except (json.JSONDecodeError, TypeError):
                         logger.warning("Failed to deserialize codex_reasoning_items, falling back to None")
-                        msg["codex_reasoning_items"] = None
+                        restored_items = None
+                    filtered_items = _filter_replayable_codex_reasoning_items(restored_items)
+                    if filtered_items:
+                        msg["codex_reasoning_items"] = filtered_items
             messages.append(msg)
         return messages
 

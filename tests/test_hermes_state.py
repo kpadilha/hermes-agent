@@ -262,6 +262,55 @@ class TestMessageStorage:
         assert conv[0]["codex_reasoning_items"] == codex_items
         assert conv[0]["codex_reasoning_items"][0]["encrypted_content"] == "enc_blob_123"
 
+    def test_codex_reasoning_items_drop_contaminated_tmp_ids(self, db):
+        """Temporary Codex reasoning ids known to fail replay are stripped from replay history."""
+        db.create_session(session_id="s1", source="telegram")
+        codex_items = [
+            {"type": "reasoning", "id": "rs_tmp_deadbeef", "encrypted_content": "bad_blob", "summary": []},
+            {"type": "reasoning", "id": "rs_good", "encrypted_content": "good_blob", "summary": []},
+        ]
+        db.append_message(
+            "s1",
+            role="assistant",
+            content="Done",
+            codex_reasoning_items=codex_items,
+        )
+
+        conv = db.get_messages_as_conversation("s1")
+        assert len(conv) == 1
+        assert conv[0]["codex_reasoning_items"] == [codex_items[1]]
+
+    def test_codex_reasoning_items_drop_message_field_when_all_items_contaminated(self, db):
+        """Replay metadata is omitted entirely when every persisted item is contaminated."""
+        db.create_session(session_id="s1", source="telegram")
+        db.append_message(
+            "s1",
+            role="assistant",
+            content="Done",
+            codex_reasoning_items=[
+                {"type": "reasoning", "id": "rs_tmp_only", "encrypted_content": "bad_blob", "summary": []}
+            ],
+        )
+
+        conv = db.get_messages_as_conversation("s1")
+        assert len(conv) == 1
+        assert "codex_reasoning_items" not in conv[0]
+
+    def test_codex_reasoning_items_preserve_non_tmp_legacy_shape(self, db):
+        """Only known-bad tmp ids are removed; legacy non-tmp payloads still round-trip."""
+        db.create_session(session_id="s1", source="cli")
+        legacy_items = [{"id": "r1", "type": "reasoning"}]
+        db.append_message(
+            "s1",
+            role="assistant",
+            content="Done",
+            codex_reasoning_items=legacy_items,
+        )
+
+        conv = db.get_messages_as_conversation("s1")
+        assert len(conv) == 1
+        assert conv[0]["codex_reasoning_items"] == legacy_items
+
 
 # =========================================================================
 # FTS5 search
