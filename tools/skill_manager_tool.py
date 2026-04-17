@@ -50,7 +50,12 @@ logger = logging.getLogger(__name__)
 # Import security scanner — external hub installs always get scanned;
 # agent-created skills only get scanned when skills.guard_agent_created is on.
 try:
-    from tools.skills_guard import scan_skill, should_allow_install, format_scan_report
+    from tools.skills_guard import (
+        scan_skill,
+        should_allow_install,
+        should_allow_skill_edit,
+        format_scan_report,
+    )
     _GUARD_AVAILABLE = True
 except ImportError:
     _GUARD_AVAILABLE = False
@@ -61,7 +66,7 @@ def _guard_agent_created_enabled() -> bool:
 
     Off by default because the agent can already execute the same code
     paths via terminal() with no gate, so the scan adds friction without
-    meaningful security.  Users who want belt-and-suspenders can turn it
+    meaningful security. Users who want belt-and-suspenders can turn it
     on via `hermes config set skills.guard_agent_created true`.
     """
     try:
@@ -75,28 +80,33 @@ def _guard_agent_created_enabled() -> bool:
         return False
 
 
-def _security_scan_skill(skill_dir: Path) -> Optional[str]:
+def _security_scan_skill(
+    skill_dir: Path,
+    before_result=None,
+    changed_files=None,
+) -> Optional[str]:
     """Scan a skill directory after write. Returns error string if blocked, else None.
 
-    No-op when skills.guard_agent_created is disabled (the default).
+    No-op when skills.guard_agent_created is disabled (the default). When
+    editing an existing skill, enforcement is diff-aware so pre-existing
+    dangerous findings do not block harmless maintenance edits.
     """
     if not _GUARD_AVAILABLE:
         return None
     if not _guard_agent_created_enabled():
         return None
     try:
-        result = scan_skill(skill_dir, source="agent-created")
-        allowed, reason = should_allow_install(result)
-        if allowed is False:
-            report = format_scan_report(result)
-            return f"Security scan blocked this skill ({reason}):\n{report}"
-        if allowed is None:
-            # "ask" verdict — for agent-created skills this means dangerous
-            # findings were detected.  Surface as an error so the agent can
-            # retry with the flagged content removed.
-            report = format_scan_report(result)
-            logger.warning("Agent-created skill blocked (dangerous findings): %s", reason)
-            return f"Security scan blocked this skill ({reason}):\n{report}"
+        after_result = scan_skill(skill_dir, source="agent-created")
+        allowed, reason = should_allow_skill_edit(
+            after_result,
+            before_result=before_result,
+            changed_files=changed_files,
+        )
+        if allowed is True:
+            return None
+        report = format_scan_report(after_result)
+        logger.warning("Agent-created skill blocked (dangerous findings): %s", reason)
+        return f"Security scan blocked this skill ({reason}):\n{report}"
     except Exception as e:
         logger.warning("Security scan failed for %s: %s", skill_dir, e, exc_info=True)
     return None
@@ -545,12 +555,17 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
         return {"success": False, "error": _skill_not_found_error(name)}
 
     skill_md = existing["path"] / "SKILL.md"
+    before_result = scan_skill(existing["path"], source="agent-created") if _GUARD_AVAILABLE else None
     # Back up original content for rollback
     original_content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else None
     _atomic_write_text(skill_md, content)
 
     # Security scan — roll back on block
-    scan_error = _security_scan_skill(existing["path"])
+    scan_error = _security_scan_skill(
+        existing["path"],
+        before_result=before_result,
+        changed_files=[("SKILL.md", original_content, content)],
+    )
     if scan_error:
         if original_content is not None:
             _atomic_write_text(skill_md, original_content)
@@ -643,10 +658,15 @@ def _patch_skill(
             }
 
     original_content = content  # for rollback
+    before_result = scan_skill(skill_dir, source="agent-created") if _GUARD_AVAILABLE else None
     _atomic_write_text(target, new_content)
 
     # Security scan — roll back on block
-    scan_error = _security_scan_skill(skill_dir)
+    scan_error = _security_scan_skill(
+        skill_dir,
+        before_result=before_result,
+        changed_files=[(str(target.relative_to(skill_dir)), original_content, new_content)],
+    )
     if scan_error:
         _atomic_write_text(target, original_content)
         return {"success": False, "error": scan_error}
@@ -746,12 +766,17 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     if err:
         return {"success": False, "error": err}
     target.parent.mkdir(parents=True, exist_ok=True)
+    before_result = scan_skill(existing["path"], source="agent-created") if _GUARD_AVAILABLE else None
     # Back up for rollback
     original_content = target.read_text(encoding="utf-8") if target.exists() else None
     _atomic_write_text(target, file_content)
 
     # Security scan — roll back on block
-    scan_error = _security_scan_skill(existing["path"])
+    scan_error = _security_scan_skill(
+        existing["path"],
+        before_result=before_result,
+        changed_files=[(file_path, original_content, file_content)],
+    )
     if scan_error:
         if original_content is not None:
             _atomic_write_text(target, original_content)

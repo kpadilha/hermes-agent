@@ -24,10 +24,13 @@ Usage:
 
 import re
 import hashlib
+import tempfile
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 
 
@@ -641,6 +644,96 @@ def scan_skill(skill_path: Path, source: str = "community") -> ScanResult:
         scanned_at=datetime.now(timezone.utc).isoformat(),
         summary=summary,
     )
+
+
+def _finding_fingerprint(finding: Finding) -> Tuple[str, str, str, str, str]:
+    """Normalize a finding for before/after comparison across harmless line shifts."""
+    return (
+        finding.pattern_id,
+        finding.severity,
+        finding.category,
+        finding.file,
+        finding.match,
+    )
+
+
+def _count_new_findings(before_result: ScanResult, after_result: ScanResult) -> int:
+    """Return how many findings were introduced by a change, ignoring line-number churn."""
+    before_counts = Counter(_finding_fingerprint(f) for f in before_result.findings)
+    after_counts = Counter(_finding_fingerprint(f) for f in after_result.findings)
+    new_total = 0
+    for fingerprint, count in after_counts.items():
+        delta = count - before_counts.get(fingerprint, 0)
+        if delta > 0:
+            new_total += delta
+    return new_total
+
+
+def _diff_added_chunks(before_content: Optional[str], after_content: str) -> List[str]:
+    """Return only newly added/replaced text chunks from an edit."""
+    before_lines = [] if before_content is None else before_content.splitlines()
+    after_lines = after_content.splitlines()
+    matcher = SequenceMatcher(a=before_lines, b=after_lines)
+    added_chunks = []
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag in {"insert", "replace"} and j1 != j2:
+            added_chunks.append("\n".join(after_lines[j1:j2]))
+    return added_chunks
+
+
+def scan_added_content(rel_path: str, before_content: Optional[str], after_content: str) -> List[Finding]:
+    """Scan only the newly added/replaced content in a changed file."""
+    findings: List[Finding] = []
+    suffix = Path(rel_path).suffix or ".md"
+    for chunk in _diff_added_chunks(before_content, after_content):
+        if not chunk.strip():
+            continue
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=suffix, delete=False) as tmp:
+            tmp.write(chunk)
+            tmp_path = Path(tmp.name)
+        try:
+            findings.extend(scan_file(tmp_path, rel_path))
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    return findings
+
+
+def has_new_dangerous_findings(changed_files: List[Tuple[str, Optional[str], str]]) -> bool:
+    """Return True only when the edited diff introduces dangerous findings."""
+    if not changed_files:
+        return False
+    for rel_path, before_content, after_content in changed_files:
+        for finding in scan_added_content(rel_path, before_content, after_content):
+            if finding.severity == "critical":
+                return True
+    return False
+
+
+def should_allow_skill_edit(
+    after_result: ScanResult,
+    *,
+    before_result: Optional[ScanResult] = None,
+    changed_files: Optional[List[Tuple[str, Optional[str], str]]] = None,
+    force: bool = False,
+) -> Tuple[Optional[bool], str]:
+    """Determine whether a skill edit should be allowed using diff-aware policy."""
+    allowed, reason = should_allow_install(after_result, force=force)
+    if allowed is not None or force:
+        return allowed, reason
+
+    if changed_files is not None:
+        if not has_new_dangerous_findings(changed_files):
+            return True, (
+                "Allowed edit (agent-created source, dangerous findings are pre-existing; "
+                "no new dangerous content introduced in diff)"
+            )
+    elif before_result is not None and _count_new_findings(before_result, after_result) == 0:
+        return True, (
+            "Allowed edit (agent-created source, dangerous findings are pre-existing; "
+            "no new findings introduced)"
+        )
+
+    return allowed, reason
 
 
 def should_allow_install(result: ScanResult, force: bool = False) -> Tuple[bool, str]:
