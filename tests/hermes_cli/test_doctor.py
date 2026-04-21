@@ -572,3 +572,48 @@ def test_run_doctor_opencode_go_skips_invalid_models_probe(monkeypatch, tmp_path
     )
     assert not any(url == "https://opencode.ai/zen/go/v1/models" for url, _, _ in calls)
     assert not any("opencode" in url.lower() and "models" in url.lower() for url, _, _ in calls)
+
+
+def test_run_doctor_minimax_404_uses_catalog_only_validation(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text("memory: {}\n", encoding="utf-8")
+    (home / ".env").write_text("MINIMAX_API_KEY=test-key\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir(exist_ok=True)
+
+    monkeypatch.setattr(doctor_mod, "HERMES_HOME", home)
+    monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", project)
+    monkeypatch.setattr(doctor_mod, "_DHH", str(home))
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
+
+    fake_model_tools = types.SimpleNamespace(
+        check_tool_availability=lambda *a, **kw: ([], []),
+        TOOLSET_REQUIREMENTS={},
+    )
+    monkeypatch.setitem(sys.modules, "model_tools", fake_model_tools)
+
+    try:
+        from hermes_cli import auth as _auth_mod
+        monkeypatch.setattr(_auth_mod, "get_nous_auth_status", lambda: {})
+        monkeypatch.setattr(_auth_mod, "get_codex_auth_status", lambda: {})
+    except ImportError:
+        pass
+
+    def fake_get(url, headers=None, timeout=None):
+        if url == "https://api.minimax.io/v1/models":
+            return types.SimpleNamespace(status_code=404)
+        return types.SimpleNamespace(status_code=200)
+
+    import httpx
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        doctor_mod.run_doctor(Namespace(fix=False))
+    out = buf.getvalue()
+
+    assert "MiniMax" in out
+    assert "catalog-only validation" in out
+    assert "HTTP 404" not in out

@@ -9,7 +9,7 @@ import pytest
 
 import gateway.run as gateway_run
 from gateway.config import Platform
-from gateway.platforms.base import MessageEvent, MessageType
+from gateway.platforms.base import MessageEvent, MessageType, SendResult
 from gateway.session import build_session_key
 from tests.gateway.restart_test_helpers import (
     make_restart_runner,
@@ -213,3 +213,26 @@ async def test_send_restart_notification_cleans_up_on_send_failure(
     await runner._send_restart_notification()
 
     assert not notify_path.exists()  # cleaned up despite error
+
+
+@pytest.mark.asyncio
+async def test_send_restart_notification_warns_when_delivery_result_failed(
+    tmp_path, monkeypatch, caplog
+):
+    """A failed SendResult should log a warning, not a false success."""
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    notify_path = tmp_path / ".restart_notify.json"
+    notify_path.write_text(json.dumps({
+        "platform": "telegram",
+        "chat_id": "123456",
+    }))
+
+    runner, adapter = make_restart_runner()
+    adapter.send = AsyncMock(return_value=SendResult(success=False, error="Chat not found"))
+
+    await runner._send_restart_notification()
+
+    assert not notify_path.exists()
+    assert "Restart notification delivery failed to telegram:123456: Chat not found" in caplog.text
+    assert "Sent restart notification to telegram:123456" not in caplog.text
