@@ -1232,7 +1232,7 @@ Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
 Environment="HERMES_HOME={hermes_home}"
 Restart=on-failure
-RestartSec=30
+RestartSec=10
 RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
 KillMode=mixed
 KillSignal=SIGTERM
@@ -1264,7 +1264,7 @@ Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
 Environment="HERMES_HOME={hermes_home}"
 Restart=on-failure
-RestartSec=30
+RestartSec=10
 RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
 KillMode=mixed
 KillSignal=SIGTERM
@@ -1509,7 +1509,7 @@ def systemd_restart(system: bool = False):
     pid = get_running_pid()
     if pid is not None and _request_gateway_self_restart(pid):
         # SIGUSR1 sent — the gateway will drain active agents, exit with
-        # code 75, and systemd will restart it after RestartSec (30s).
+        # code 75, and systemd will restart it after RestartSec (10s).
         # Wait for the old process to die and the new one to become active
         # so the CLI doesn't return while the service is still restarting.
         import time
