@@ -965,6 +965,8 @@ def run_doctor(args):
                 elif _resp.status_code == 401:
                     print(f"\r  {color('✗', Colors.RED)} {_label} {color('(invalid API key)', Colors.DIM)}           ")
                     issues.append(f"Check {_env_vars[0]} in .env")
+                elif _resp.status_code == 404 and _pname in {"MiniMax", "MiniMax (China)"}:
+                    print(f"\r  {color('✓', Colors.GREEN)} {_label} {color('(catalog-only validation)', Colors.DIM)}           ")
                 else:
                     print(f"\r  {color('⚠', Colors.YELLOW)} {_label} {color(f'(HTTP {_resp.status_code})', Colors.DIM)}           ")
             except Exception as _e:
