@@ -1,9 +1,74 @@
 """Tests for hermes_cli.gateway."""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import patch, call
 
 import hermes_cli.gateway as gateway
+
+
+def test_gateway_health_json_uses_runtime_and_api_probe(monkeypatch, capsys):
+    monkeypatch.setattr(
+        gateway,
+        "build_gateway_health_payload",
+        lambda system=False: {
+            "manager": "systemd",
+            "service_installed": True,
+            "service_running": True,
+            "gateway_pids": [123],
+            "running": True,
+            "runtime_state": {"gateway_state": "running"},
+            "api_server": {
+                "configured": True,
+                "host": "127.0.0.1",
+                "port": 8642,
+                "health": {"ok": True},
+                "health_detailed": {"ok": True},
+            },
+        },
+    )
+
+    gateway.gateway_command(SimpleNamespace(gateway_command="health", system=False, json=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["runtime_state"]["gateway_state"] == "running"
+    assert payload["api_server"]["configured"] is True
+
+
+def test_gateway_health_text_reports_api_server_status(monkeypatch, capsys):
+    monkeypatch.setattr(
+        gateway,
+        "build_gateway_health_payload",
+        lambda system=False: {
+            "manager": "systemd",
+            "service_installed": True,
+            "service_running": True,
+            "gateway_pids": [123],
+            "running": True,
+            "runtime_state": {
+                "gateway_state": "running",
+                "platforms": {
+                    "telegram": {"state": "connected"},
+                    "api_server": {"state": "connected"},
+                },
+            },
+            "api_server": {
+                "configured": True,
+                "host": "127.0.0.1",
+                "port": 8642,
+                "health": {"ok": True},
+                "health_detailed": {"ok": True},
+            },
+        },
+    )
+
+    gateway.gateway_command(SimpleNamespace(gateway_command="health", system=False, json=False))
+
+    out = capsys.readouterr().out
+    assert "Gateway runtime: running" in out
+    assert "API server configured: http://127.0.0.1:8642" in out
+    assert "/health: ok" in out
+    assert "/health/detailed: ok" in out
 
 
 class TestSystemdLingerStatus:
