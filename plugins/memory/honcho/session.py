@@ -988,7 +988,12 @@ class HonchoSessionManager:
 
         try:
             observer_peer_id, target_peer_id = self._resolve_observer_target(session, peer)
-            return self._fetch_peer_card(observer_peer_id, target=target_peer_id)
+            card = self._fetch_peer_card(observer_peer_id, target=target_peer_id)
+            if card:
+                return card
+            if target_peer_id and target_peer_id != observer_peer_id:
+                return self._fetch_peer_card(target_peer_id)
+            return []
         except Exception as e:
             logger.debug("Failed to fetch peer card from Honcho: %s", e)
             return []

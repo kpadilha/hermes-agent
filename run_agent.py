@@ -763,6 +763,7 @@ class AIAgent:
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
         persist_session: bool = True,
+        session_working_memory: Dict[str, Any] | None = None,
     ):
         """
         Initialize the AI Agent.
@@ -830,6 +831,7 @@ class AIAgent:
         self.skip_context_files = skip_context_files
         self.pass_session_id = pass_session_id
         self.persist_session = persist_session
+        self.session_working_memory = dict(session_working_memory or {})
         self._credential_pool = credential_pool
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
@@ -4188,6 +4190,323 @@ class AIAgent:
                 len(missing_results),
             )
         return messages
+
+    @staticmethod
+    def _extract_text_content(content: Any) -> str:
+        """Best-effort plain-text extraction from message content."""
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: List[str] = []
+            for part in content:
+                if isinstance(part, str) and part.strip():
+                    parts.append(part.strip())
+                    continue
+                if not isinstance(part, dict):
+                    continue
+                text = str(part.get("text", "") or "").strip()
+                if text:
+                    parts.append(text)
+            return "\n".join(parts).strip()
+        return ""
+
+    @staticmethod
+    def _is_short_confirmation_message(text: str) -> bool:
+        """Return True for compact confirmations that should bind to recent context."""
+        normalized = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+        if not normalized:
+            return False
+        words = normalized.split()
+        if len(normalized) > 48 or len(words) > 4:
+            return False
+
+        direct = {
+            "sim", "yes", "ok", "okay", "certo", "correto", "isso", "pode ir",
+            "pode seguir", "continue", "continuar", "segue", "seguir", "faça",
+            "faca", "desenhe", "manda", "vai", "go ahead",
+        }
+        if normalized in direct:
+            return True
+
+        starts = (
+            "sim ", "yes ", "ok ", "okay ", "certo ", "correto ", "pode seguir ",
+            "continue ", "faça ", "faca ", "desenhe ",
+        )
+        return normalized.startswith(starts)
+
+    @staticmethod
+    def _assistant_message_looks_actionable(text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+        if not normalized:
+            return False
+        action_markers = (
+            "se quiser", "quer que eu", "posso ", "vou ", "eu desenho", "desenho ",
+            "faço", "faco", "gero", "generate", "build", "crio", "create",
+        )
+        return any(marker in normalized for marker in action_markers)
+
+    @staticmethod
+    def _build_proposal_id(text: str, source_message_index: int | None = None) -> str:
+        normalized_text = re.sub(r"\s+", " ", str(text or "")).strip()
+        seed = f"{source_message_index if source_message_index is not None else 'na'}:{normalized_text}"
+        digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:10]
+        return f"p{digest}"
+
+    @classmethod
+    def _make_pending_proposal(
+        cls,
+        text: str,
+        source_message_index: int | None = None,
+        lifecycle_version: int = 1,
+    ) -> Dict[str, Any]:
+        proposal: Dict[str, Any] = {
+            "proposal_id": cls._build_proposal_id(text, source_message_index),
+            "text": text,
+            "lifecycle_version": lifecycle_version,
+        }
+        if source_message_index is not None:
+            proposal["source_message_index"] = int(source_message_index)
+        return proposal
+
+    @classmethod
+    def _extract_recent_assistant_actionables(
+        cls,
+        messages: List[Dict[str, Any]] | None,
+        limit: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """Return recent assistant proposals in newest-first order with lifecycle-aware proposal IDs."""
+        if not messages:
+            return []
+        actionable_entries: List[tuple[int, str]] = []
+        for idx, msg in enumerate(messages):
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            text = cls._extract_text_content(msg.get("content"))
+            if not text or not cls._assistant_message_looks_actionable(text):
+                continue
+            actionable_entries.append((idx, text))
+
+        lifecycle_counters: Dict[str, int] = {}
+        enriched: List[Dict[str, Any]] = []
+        for idx, text in actionable_entries:
+            lifecycle_version = lifecycle_counters.get(text, 0) + 1
+            lifecycle_counters[text] = lifecycle_version
+            enriched.append(
+                cls._make_pending_proposal(
+                    text,
+                    source_message_index=idx,
+                    lifecycle_version=lifecycle_version,
+                )
+            )
+
+        return list(reversed(enriched))[: max(1, limit)]
+
+    @classmethod
+    def _extract_recent_assistant_actionable(cls, messages: List[Dict[str, Any]] | None) -> Optional[str]:
+        """Return the most recent assistant message that looks like an actionable proposal."""
+        proposals = cls._extract_recent_assistant_actionables(messages, limit=1)
+        return proposals[0]["text"] if proposals else None
+
+    @classmethod
+    def _normalize_pending_proposals(cls, proposals: Any) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for item in proposals or []:
+            if isinstance(item, dict):
+                text = str(item.get("text", "") or "").strip()
+                proposal_id = str(item.get("proposal_id", "") or "").strip()
+                source_message_index = item.get("source_message_index")
+                lifecycle_version = item.get("lifecycle_version", 1)
+            else:
+                text = str(item or "").strip()
+                proposal_id = ""
+                source_message_index = None
+                lifecycle_version = 1
+            if not text:
+                continue
+            try:
+                source_message_index = (
+                    int(source_message_index)
+                    if source_message_index is not None and str(source_message_index).strip() != ""
+                    else None
+                )
+            except (TypeError, ValueError):
+                source_message_index = None
+            try:
+                lifecycle_version = int(lifecycle_version or 1)
+            except (TypeError, ValueError):
+                lifecycle_version = 1
+            normalized_item = cls._make_pending_proposal(
+                text,
+                source_message_index=source_message_index,
+                lifecycle_version=lifecycle_version,
+            )
+            if proposal_id:
+                normalized_item["proposal_id"] = proposal_id
+            normalized.append(normalized_item)
+        return normalized
+
+    @classmethod
+    def _extract_actionable_from_working_memory(cls, working_memory: Dict[str, Any] | None) -> Optional[str]:
+        if not isinstance(working_memory, dict):
+            return None
+        if working_memory.get("awaiting_confirmation") is False:
+            return None
+        if working_memory.get("ambiguity_requires_clarification"):
+            return None
+        text = cls._extract_text_content(working_memory.get("last_assistant_actionable"))
+        return text or None
+
+    @classmethod
+    def _apply_recent_turn_binding(
+        cls,
+        user_message: str,
+        conversation_history: List[Dict[str, Any]] | None,
+        working_memory: Dict[str, Any] | None = None,
+    ) -> str:
+        """Inject an API-only hint when a short confirmation should bind to the latest assistant proposal."""
+        text = str(user_message or "")
+        if not cls._is_short_confirmation_message(text):
+            return text
+
+        if isinstance(working_memory, dict) and working_memory.get("ambiguity_requires_clarification"):
+            return text
+
+        actionable = cls._extract_actionable_from_working_memory(working_memory)
+        if not actionable:
+            actionable = cls._extract_recent_assistant_actionable(conversation_history)
+        if not actionable:
+            return text
+
+        return (
+            f"{text}\n\n"
+            "[Recent-turn continuity note: Interpret this short confirmation as referring "
+            "to the immediately preceding assistant proposal below unless the transcript "
+            f"clearly says otherwise.\nAssistant proposal: {actionable}]"
+        )
+
+    @classmethod
+    def _resolve_proposal_selection(
+        cls,
+        user_message: str,
+        working_memory: Dict[str, Any] | None,
+    ) -> Optional[str]:
+        if not isinstance(working_memory, dict):
+            return None
+        proposals = cls._normalize_pending_proposals(working_memory.get("pending_proposals"))
+        if len(proposals) < 2:
+            return None
+
+        normalized = re.sub(r"\s+", " ", str(user_message or "")).strip().lower()
+        if not normalized:
+            return None
+
+        digit_map = {str(i + 1): proposals[i] for i in range(len(proposals))}
+        if normalized in digit_map:
+            return digit_map[normalized]
+
+        proposal_id_matches = [
+            proposal
+            for proposal in proposals
+            if proposal["proposal_id"].lower() in normalized
+        ]
+        if len(proposal_id_matches) == 1:
+            return proposal_id_matches[0]
+
+        ordinal_map = {
+            "primeira": 0, "primeiro": 0, "first": 0,
+            "segunda": 1, "segundo": 1, "second": 1,
+            "terceira": 2, "terceiro": 2, "third": 2,
+            "quarta": 3, "quarto": 3, "fourth": 3,
+        }
+        if normalized in ordinal_map and ordinal_map[normalized] < len(proposals):
+            return proposals[ordinal_map[normalized]]
+
+        tokens = {tok for tok in re.findall(r"[\wÀ-ÿ]+", normalized) if len(tok) >= 4}
+        best: Optional[Dict[str, str]] = None
+        best_score = 0
+        for proposal in proposals:
+            p_tokens = {tok for tok in re.findall(r"[\wÀ-ÿ]+", proposal["text"].lower()) if len(tok) >= 4}
+            score = len(tokens & p_tokens)
+            if score > best_score:
+                best = proposal
+                best_score = score
+            elif score == best_score and score > 0:
+                best = None
+        return best if best_score > 0 else None
+
+    @classmethod
+    def _build_disambiguation_prompt(cls, working_memory: Dict[str, Any] | None) -> Optional[str]:
+        if not isinstance(working_memory, dict):
+            return None
+        proposals = cls._normalize_pending_proposals(working_memory.get("pending_proposals"))
+        if len(proposals) < 2:
+            return None
+        lines = ["Qual opção você quer que eu execute?"]
+        for idx, proposal in enumerate(proposals[:4], start=1):
+            lines.append(f"{idx}. {proposal['text']} ({proposal['proposal_id']})")
+        lines.append("Responda com o número ou repita a opção desejada.")
+        return "\n".join(lines)
+
+    @classmethod
+    def _maybe_build_disambiguation_response(
+        cls,
+        user_message: str,
+        working_memory: Dict[str, Any] | None,
+    ) -> Optional[str]:
+        if not cls._is_short_confirmation_message(user_message):
+            return None
+        if not isinstance(working_memory, dict) or not working_memory.get("ambiguity_requires_clarification"):
+            return None
+        if cls._resolve_proposal_selection(user_message, working_memory):
+            return None
+        return cls._build_disambiguation_prompt(working_memory)
+
+    @classmethod
+    def _apply_user_message_to_working_memory(
+        cls,
+        user_message: str,
+        working_memory: Dict[str, Any] | None,
+    ) -> Dict[str, Any]:
+        if not isinstance(working_memory, dict) or not working_memory:
+            return {}
+        current = dict(working_memory)
+        selected = cls._resolve_proposal_selection(user_message, current)
+        if selected:
+            return {}
+        if not cls._is_short_confirmation_message(user_message):
+            return current
+        if current.get("ambiguity_requires_clarification"):
+            return current
+        if current.get("awaiting_confirmation") and current.get("pending_proposals"):
+            return {}
+        return current
+
+    @classmethod
+    def _merge_recent_turn_working_memory(
+        cls,
+        prior_working_memory: Dict[str, Any] | None,
+        user_message: str,
+        messages: List[Dict[str, Any]] | None,
+    ) -> Dict[str, Any]:
+        consumed = cls._apply_user_message_to_working_memory(user_message, prior_working_memory)
+        rebuilt = cls._build_recent_turn_working_memory(messages)
+        return rebuilt or consumed
+
+    @classmethod
+    def _build_recent_turn_working_memory(cls, messages: List[Dict[str, Any]] | None) -> Dict[str, Any]:
+        proposals = cls._extract_recent_assistant_actionables(messages, limit=3)
+        if not proposals:
+            return {}
+        primary = proposals[0]
+        normalized = re.sub(r"\s+", " ", primary["text"]).strip()
+        topic = normalized[:160]
+        return {
+            "last_assistant_actionable": primary["text"],
+            "awaiting_confirmation": True,
+            "active_topic": topic,
+            "pending_proposals": proposals,
+            "ambiguity_requires_clarification": len(proposals) > 1,
+        }
 
     @staticmethod
     def _cap_delegate_task_calls(tool_calls: list) -> list:
@@ -8672,6 +8991,20 @@ class AIAgent:
         # Preserve the original user message (no nudge injection).
         original_user_message = persist_user_message if persist_user_message is not None else user_message
 
+        # API-only recent-turn binding: when the user sends a short confirmation
+        # such as "sim" / "continue" / "faça", anchor it to the latest
+        # assistant actionable proposal from the transcript tail. Keep the
+        # persisted transcript unchanged via persist_user_message.
+        _disambiguation_response = self._maybe_build_disambiguation_response(
+            original_user_message,
+            self.session_working_memory,
+        )
+        user_message = self._apply_recent_turn_binding(
+            user_message,
+            conversation_history,
+            self.session_working_memory,
+        )
+
         # Track memory nudge trigger (turn-based, checked here).
         # Skill trigger is checked AFTER the agent loop completes, based on
         # how many tool iterations THIS turn used.
@@ -8689,7 +9022,45 @@ class AIAgent:
         messages.append(user_msg)
         current_turn_user_idx = len(messages) - 1
         self._persist_user_message_idx = current_turn_user_idx
-        
+
+        if _disambiguation_response:
+            messages.append({"role": "assistant", "content": _disambiguation_response})
+            updated_working_memory = self._merge_recent_turn_working_memory(
+                self.session_working_memory,
+                original_user_message,
+                messages,
+            )
+            result = {
+                "final_response": _disambiguation_response,
+                "last_reasoning": None,
+                "messages": messages,
+                "api_calls": 0,
+                "completed": True,
+                "partial": False,
+                "interrupted": False,
+                "response_previewed": False,
+                "model": self.model,
+                "provider": self.provider,
+                "base_url": self.base_url,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "reasoning_tokens": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "last_prompt_tokens": 0,
+                "estimated_cost_usd": 0.0,
+                "cost_status": "unknown",
+                "cost_source": self.session_cost_source,
+                "session_working_memory": updated_working_memory,
+                "needs_disambiguation": True,
+                "disambiguation_prompt": _disambiguation_response,
+            }
+            self._stream_callback = None
+            return result
+
         if not self.quiet_mode:
             _print_preview = _summarize_user_message_for_log(user_message)
             self._safe_print(f"💬 Starting conversation: '{_print_preview[:60]}{'...' if len(_print_preview) > 60 else ''}'")
@@ -11718,6 +12089,11 @@ class AIAgent:
             "estimated_cost_usd": self.session_estimated_cost_usd,
             "cost_status": self.session_cost_status,
             "cost_source": self.session_cost_source,
+            "session_working_memory": self._merge_recent_turn_working_memory(
+                self.session_working_memory,
+                original_user_message,
+                messages,
+            ),
         }
         # If a /steer landed after the final assistant turn (no more tool
         # batches to drain into), hand it back to the caller so it can be

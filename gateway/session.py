@@ -390,6 +390,12 @@ class SessionEntry:
     resume_reason: Optional[str] = None  # e.g. "restart_timeout"
     last_resume_marked_at: Optional[datetime] = None
 
+    # Small structured working memory for recent-turn continuity.
+    # Stores the latest actionable assistant proposal and related context
+    # so short confirmations can bind to the active topic instead of
+    # drifting to semantically adjacent older context.
+    working_memory: Optional[Dict[str, Any]] = None
+
     def to_dict(self) -> Dict[str, Any]:
         result = {
             "session_key": self.session_key,
@@ -416,6 +422,7 @@ class SessionEntry:
                 if self.last_resume_marked_at
                 else None
             ),
+            "working_memory": self.working_memory or None,
         }
         if self.origin:
             result["origin"] = self.origin.to_dict()
@@ -464,6 +471,7 @@ class SessionEntry:
             resume_pending=data.get("resume_pending", False),
             resume_reason=data.get("resume_reason"),
             last_resume_marked_at=last_resume_marked_at,
+            working_memory=data.get("working_memory") or None,
         )
 
 
@@ -819,6 +827,7 @@ class SessionStore:
         self,
         session_key: str,
         last_prompt_tokens: int = None,
+        working_memory: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Update lightweight session metadata after an interaction."""
         with self._lock:
@@ -829,6 +838,8 @@ class SessionStore:
                 entry.updated_at = _now()
                 if last_prompt_tokens is not None:
                     entry.last_prompt_tokens = last_prompt_tokens
+                if working_memory is not None:
+                    entry.working_memory = working_memory
                 self._save()
 
     def suspend_session(self, session_key: str) -> bool:

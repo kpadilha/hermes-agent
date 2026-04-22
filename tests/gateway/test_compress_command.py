@@ -3,6 +3,8 @@
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
+from run_agent import AIAgent
+
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
@@ -127,3 +129,40 @@ async def test_compress_command_explains_when_token_estimate_rises():
     assert "denser summaries" in result
     agent_instance.shutdown_memory_provider.assert_called_once()
     agent_instance.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_compress_command_rebuilds_working_memory_from_compressed_transcript():
+    history = [
+        {"role": "user", "content": "o que você pode fazer?"},
+        {"role": "assistant", "content": "Posso explicar o fluxo atual."},
+        {"role": "user", "content": "e mais?"},
+        {"role": "assistant", "content": "Também posso desenhar o diagrama final."},
+    ]
+    compressed = list(history)
+    expected_working_memory = AIAgent._build_recent_turn_working_memory(compressed)
+    runner = _make_runner(history)
+    agent_instance = MagicMock()
+    agent_instance.shutdown_memory_provider = MagicMock()
+    agent_instance.close = MagicMock()
+    agent_instance.context_compressor.protect_first_n = 0
+    agent_instance.context_compressor._align_boundary_forward.return_value = 0
+    agent_instance.context_compressor._find_tail_cut_by_tokens.return_value = 2
+    agent_instance.session_id = "sess-2"
+    agent_instance._compress_context.return_value = (compressed, "")
+
+    with (
+        patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "***"}),
+        patch("gateway.run._resolve_gateway_model", return_value="test-model"),
+        patch("run_agent.AIAgent") as agent_cls,
+        patch("agent.model_metadata.estimate_messages_tokens_rough", return_value=100),
+    ):
+        agent_cls.return_value = agent_instance
+        agent_cls._build_recent_turn_working_memory.return_value = expected_working_memory
+        await runner._handle_compress_command(_make_event())
+
+    runner.session_store.update_session.assert_called_once_with(
+        runner.session_store.get_or_create_session.return_value.session_key,
+        last_prompt_tokens=0,
+        working_memory=expected_working_memory,
+    )
