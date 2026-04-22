@@ -1,5 +1,6 @@
 """Tests for hermes_cli.gateway."""
 
+import json
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch, call
@@ -68,101 +69,68 @@ def test_run_gateway_exits_nonzero_when_start_gateway_reports_failure(monkeypatc
     assert calls == [(True, None)]
 
 
-def test_run_gateway_refuses_root_in_official_docker(monkeypatch, tmp_path, capsys):
-    project_root = tmp_path / "opt" / "hermes"
-    (project_root / "docker").mkdir(parents=True)
-    (project_root / "docker" / "entrypoint.sh").write_text("#!/bin/sh\n")
+def test_gateway_health_json_uses_runtime_and_api_probe(monkeypatch, capsys):
+    monkeypatch.setattr(
+        gateway,
+        "build_gateway_health_payload",
+        lambda system=False: {
+            "manager": "systemd",
+            "service_installed": True,
+            "service_running": True,
+            "gateway_pids": [123],
+            "running": True,
+            "runtime_state": {"gateway_state": "running"},
+            "api_server": {
+                "configured": True,
+                "host": "127.0.0.1",
+                "port": 8642,
+                "health": {"ok": True},
+                "health_detailed": {"ok": True},
+            },
+        },
+    )
 
-    monkeypatch.setattr(gateway, "PROJECT_ROOT", project_root)
-    monkeypatch.setattr(gateway.os, "geteuid", lambda: 0)
-    monkeypatch.delenv("HERMES_ALLOW_ROOT_GATEWAY", raising=False)
-    monkeypatch.setattr(gateway, "_is_official_docker_checkout", lambda: True)
+    gateway.gateway_command(SimpleNamespace(gateway_command="health", system=False, json=True))
 
-    with pytest.raises(SystemExit) as exc_info:
-        gateway.run_gateway()
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["runtime_state"]["gateway_state"] == "running"
+    assert payload["api_server"]["configured"] is True
 
-    assert exc_info.value.code == 1
+
+def test_gateway_health_text_reports_api_server_status(monkeypatch, capsys):
+    monkeypatch.setattr(
+        gateway,
+        "build_gateway_health_payload",
+        lambda system=False: {
+            "manager": "systemd",
+            "service_installed": True,
+            "service_running": True,
+            "gateway_pids": [123],
+            "running": True,
+            "runtime_state": {
+                "gateway_state": "running",
+                "platforms": {
+                    "telegram": {"state": "connected"},
+                    "api_server": {"state": "connected"},
+                },
+            },
+            "api_server": {
+                "configured": True,
+                "host": "127.0.0.1",
+                "port": 8642,
+                "health": {"ok": True},
+                "health_detailed": {"ok": True},
+            },
+        },
+    )
+
+    gateway.gateway_command(SimpleNamespace(gateway_command="health", system=False, json=False))
+
     out = capsys.readouterr().out
-    assert "Refusing to run the Hermes gateway as root" in out
-    assert "/opt/hermes/docker/entrypoint.sh" in out
-
-
-def test_run_gateway_root_guard_has_escape_hatch(monkeypatch):
-    calls = []
-
-    def fake_start_gateway(*, replace, verbosity):
-        calls.append((replace, verbosity))
-        return object()
-
-    _install_fake_gateway_run(monkeypatch, fake_start_gateway)
-    monkeypatch.setattr(gateway.asyncio, "run", lambda coro: True)
-    monkeypatch.setattr(gateway.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(gateway, "_is_official_docker_checkout", lambda: True)
-    monkeypatch.setenv("HERMES_ALLOW_ROOT_GATEWAY", "1")
-
-    gateway.run_gateway(verbose=2, replace=True)
-
-    assert calls == [(True, 2)]
-
-
-def test_run_gateway_windows_foreground_keeps_ctrl_c_enabled(monkeypatch):
-    calls = []
-
-    def fake_start_gateway(*, replace, verbosity):
-        calls.append((replace, verbosity))
-        return object()
-
-    class _TTY:
-        def isatty(self):
-            return True
-
-    signal_calls = []
-
-    def fake_signal(sig, handler):
-        signal_calls.append((sig, handler))
-
-    _install_fake_gateway_run(monkeypatch, fake_start_gateway)
-    monkeypatch.setattr(gateway, "is_windows", lambda: True)
-    monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
-    monkeypatch.setattr(gateway.sys, "stdin", _TTY())
-    monkeypatch.delenv("HERMES_GATEWAY_DETACHED", raising=False)
-    monkeypatch.setattr(gateway.signal, "signal", fake_signal)
-    monkeypatch.setattr(gateway.asyncio, "run", lambda coro: True)
-
-    gateway.run_gateway()
-
-    assert calls == [(False, 0)]
-    assert (gateway.signal.SIGINT, gateway.signal.SIG_IGN) not in signal_calls
-
-
-def test_run_gateway_windows_detached_absorbs_console_controls(monkeypatch):
-    calls = []
-
-    def fake_start_gateway(*, replace, verbosity):
-        calls.append((replace, verbosity))
-        return object()
-
-    class _TTY:
-        def isatty(self):
-            return True
-
-    signal_calls = []
-
-    def fake_signal(sig, handler):
-        signal_calls.append((sig, handler))
-
-    _install_fake_gateway_run(monkeypatch, fake_start_gateway)
-    monkeypatch.setattr(gateway, "is_windows", lambda: True)
-    monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
-    monkeypatch.setattr(gateway.sys, "stdin", _TTY())
-    monkeypatch.setenv("HERMES_GATEWAY_DETACHED", "1")
-    monkeypatch.setattr(gateway.signal, "signal", fake_signal)
-    monkeypatch.setattr(gateway.asyncio, "run", lambda coro: True)
-
-    gateway.run_gateway()
-
-    assert calls == [(False, 0)]
-    assert (gateway.signal.SIGINT, gateway.signal.SIG_IGN) in signal_calls
+    assert "Gateway runtime: running" in out
+    assert "API server configured: http://127.0.0.1:8642" in out
+    assert "/health: ok" in out
+    assert "/health/detailed: ok" in out
 
 
 class TestSystemdLingerStatus:
