@@ -3,13 +3,17 @@ Gateway subcommand for hermes CLI.
 
 Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 """
-
 import asyncio
+import json
+import getpass
 import os
 import shutil
 import signal
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -2886,14 +2890,90 @@ def _platform_status(platform: dict) -> str:
     return "not configured"
 
 
-def _runtime_health_lines() -> list[str]:
-    """Summarize the latest persisted gateway runtime health state."""
+def _load_runtime_health_state() -> dict | None:
     try:
         from gateway.status import read_runtime_status
     except Exception:
-        return []
+        return None
+    return read_runtime_status() or None
 
-    state = read_runtime_status()
+
+def _probe_api_server_health(url: str, timeout: float = 2.0) -> dict[str, object]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(body)
+            return {"ok": True, "url": url, "body": data}
+    except Exception as e:
+        return {"ok": False, "url": url, "error": str(e)}
+
+
+def build_gateway_health_payload(system: bool = False) -> dict[str, object]:
+    from gateway.config import Platform, load_gateway_config
+
+    snapshot = get_gateway_runtime_snapshot(system=system)
+    runtime_state = _load_runtime_health_state() or {}
+    config = load_gateway_config()
+    api_cfg = config.platforms.get(Platform.API_SERVER)
+    api_enabled = bool(api_cfg and api_cfg.enabled)
+    api_host = None
+    api_port = None
+    api_health = None
+    api_health_detailed = None
+    if api_enabled:
+        extra = api_cfg.extra if isinstance(api_cfg.extra, dict) else {}
+        api_host = str(extra.get("host") or "127.0.0.1")
+        api_port = int(extra.get("port") or 8642)
+        base = f"http://{api_host}:{api_port}"
+        api_health = _probe_api_server_health(f"{base}/health")
+        api_health_detailed = _probe_api_server_health(f"{base}/health/detailed")
+
+    return {
+        "manager": snapshot.manager,
+        "service_installed": snapshot.service_installed,
+        "service_running": snapshot.service_running,
+        "gateway_pids": list(snapshot.gateway_pids),
+        "running": snapshot.running,
+        "runtime_state": runtime_state,
+        "api_server": {
+            "configured": api_enabled,
+            "host": api_host,
+            "port": api_port,
+            "health": api_health,
+            "health_detailed": api_health_detailed,
+        },
+    }
+
+
+def print_gateway_health(system: bool = False, json_output: bool = False) -> None:
+    payload = build_gateway_health_payload(system=system)
+    if json_output:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    runtime_state = payload.get("runtime_state") or {}
+    gateway_state = runtime_state.get("gateway_state") or "unknown"
+    print(f"Gateway runtime: {gateway_state}")
+    connected = []
+    for name, pdata in (runtime_state.get("platforms") or {}).items():
+        if isinstance(pdata, dict) and pdata.get("state") == "connected":
+            connected.append(name)
+    if connected:
+        print(f"Connected platforms: {', '.join(sorted(connected))}")
+    api = payload.get("api_server") or {}
+    if api.get("configured"):
+        print(f"API server configured: http://{api.get('host')}:{api.get('port')}")
+        health = api.get("health") or {}
+        detailed = api.get("health_detailed") or {}
+        print(f"  /health: {'ok' if health.get('ok') else 'fail'}")
+        print(f"  /health/detailed: {'ok' if detailed.get('ok') else 'fail'}")
+    else:
+        print("API server configured: no")
+
+
+def _runtime_health_lines() -> list[str]:
+    """Summarize the latest persisted gateway runtime health state."""
+    state = _load_runtime_health_state()
     if not state:
         return []
 
@@ -4315,6 +4395,12 @@ def _gateway_command_inner(args):
             print("Starting gateway...")
             run_gateway(verbose=0)
     
+    elif subcmd == "health":
+        print_gateway_health(
+            system=getattr(args, 'system', False),
+            json_output=getattr(args, 'json', False),
+        )
+
     elif subcmd == "status":
         deep = getattr(args, 'deep', False)
         full = getattr(args, 'full', False)
