@@ -212,6 +212,18 @@ class TestPeerLookupHelpers:
         assert mgr.get_peer_card(session.key) == ["Name: Robert"]
         assistant_peer.get_card.assert_called_once_with(target=session.user_peer_id)
 
+    def test_get_peer_card_falls_back_to_target_peer_when_observer_card_is_empty(self):
+        mgr, session = self._make_cached_manager()
+        assistant_peer = MagicMock()
+        assistant_peer.get_card.return_value = []
+        user_peer = MagicMock()
+        user_peer.get_card.return_value = ["Name: Robert"]
+        mgr._get_or_create_peer = MagicMock(side_effect=[assistant_peer, user_peer])
+
+        assert mgr.get_peer_card(session.key) == ["Name: Robert"]
+        assistant_peer.get_card.assert_called_once_with(target=session.user_peer_id)
+        user_peer.get_card.assert_called_once_with()
+
     def test_search_context_uses_assistant_perspective_with_target(self):
         mgr, session = self._make_cached_manager()
         assistant_peer = MagicMock()

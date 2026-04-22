@@ -5213,8 +5213,15 @@ class GatewayRunner:
                                     self.session_store.rewrite_transcript(
                                         session_entry.session_id, _compressed
                                     )
+                                    compressed_working_memory = AIAgent._build_recent_turn_working_memory(_compressed)
                                     # Reset stored token count — transcript was rewritten
                                     session_entry.last_prompt_tokens = 0
+                                    session_entry.working_memory = compressed_working_memory
+                                    self.session_store.update_session(
+                                        session_entry.session_key,
+                                        last_prompt_tokens=0,
+                                        working_memory=compressed_working_memory,
+                                    )
                                     history = _compressed
                                     _new_count = len(_compressed)
                                     _new_tokens = estimate_messages_tokens_rough(
@@ -5718,6 +5725,7 @@ class GatewayRunner:
             self.session_store.update_session(
                 session_entry.session_key,
                 last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
+                working_memory=agent_result.get("session_working_memory") or {},
             )
 
             # Auto voice reply: send TTS audio before the text response
@@ -6854,8 +6862,16 @@ class GatewayRunner:
         # Truncate history to before the last user message and persist
         truncated = history[:last_user_idx]
         self.session_store.rewrite_transcript(session_entry.session_id, truncated)
+        from run_agent import AIAgent
+        rebuilt_working_memory = AIAgent._build_recent_turn_working_memory(truncated)
         # Reset stored token count — transcript was truncated
         session_entry.last_prompt_tokens = 0
+        session_entry.working_memory = rebuilt_working_memory
+        self.session_store.update_session(
+            session_entry.session_key,
+            last_prompt_tokens=0,
+            working_memory=rebuilt_working_memory,
+        )
         
         # Re-send by creating a fake text event with the old message
         retry_event = MessageEvent(
@@ -6887,9 +6903,18 @@ class GatewayRunner:
         
         removed_msg = history[last_user_idx].get("content", "")
         removed_count = len(history) - last_user_idx
-        self.session_store.rewrite_transcript(session_entry.session_id, history[:last_user_idx])
+        truncated = history[:last_user_idx]
+        self.session_store.rewrite_transcript(session_entry.session_id, truncated)
+        from run_agent import AIAgent
+        rebuilt_working_memory = AIAgent._build_recent_turn_working_memory(truncated)
         # Reset stored token count — transcript was truncated
         session_entry.last_prompt_tokens = 0
+        session_entry.working_memory = rebuilt_working_memory
+        self.session_store.update_session(
+            session_entry.session_key,
+            last_prompt_tokens=0,
+            working_memory=rebuilt_working_memory,
+        )
         
         preview = removed_msg[:40] + "..." if len(removed_msg) > 40 else removed_msg
         return f"↩️ Undid {removed_count} message(s).\nRemoved: \"{preview}\""
@@ -8003,9 +8028,12 @@ class GatewayRunner:
                     self.session_store._save()
 
                 self.session_store.rewrite_transcript(new_session_id, compressed)
+                compressed_working_memory = AIAgent._build_recent_turn_working_memory(compressed)
                 # Reset stored token count — transcript changed, old value is stale
                 self.session_store.update_session(
-                    session_entry.session_key, last_prompt_tokens=0
+                    session_entry.session_key,
+                    last_prompt_tokens=0,
+                    working_memory=compressed_working_memory,
                 )
                 new_tokens = estimate_messages_tokens_rough(compressed)
                 summary = summarize_manual_compression(
@@ -10636,6 +10664,9 @@ class GatewayRunner:
         from run_agent import AIAgent
         import queue
 
+        _session_entry = self.session_store.get_or_create_session(source) if session_key else None
+        _session_working_memory = dict(getattr(_session_entry, "working_memory", {}) or {})
+
         def _run_still_current() -> bool:
             if run_generation is None or not session_key:
                 return True
@@ -11296,6 +11327,7 @@ class GatewayRunner:
                     gateway_session_key=session_key,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
+                    session_working_memory=_session_working_memory,
                 )
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
