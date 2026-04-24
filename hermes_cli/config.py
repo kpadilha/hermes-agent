@@ -879,6 +879,9 @@ DEFAULT_CONFIG = {
         # "hindsight", "holographic", "retaindb", "byterover".
         # Only ONE external provider is allowed at a time.
         "provider": "",
+        # Local-first structured shadow ledger for durable writes.
+        # Keeps ADD/NOOP/SUPERSEDE decisions in profile-scoped SQLite.
+        "write_gate_enabled": True,
     },
 
     # Subagent delegation — override the provider:model used by delegate_task

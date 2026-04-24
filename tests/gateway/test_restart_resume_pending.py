@@ -237,6 +237,25 @@ class TestMarkResumePending:
         assert refreshed.resume_reason == "restart_timeout"
         assert refreshed.last_resume_marked_at is not None
 
+    def test_suspend_clears_resume_flags_and_working_memory_immediately(self, tmp_path):
+        store = _make_store(tmp_path)
+        source = _make_source()
+        entry = store.get_or_create_session(source)
+        store.update_session(
+            entry.session_key,
+            working_memory={"awaiting_confirmation": True, "active_topic": "paper-architecture"},
+        )
+        store.mark_resume_pending(entry.session_key, reason="shutdown_timeout")
+
+        assert store.suspend_session(entry.session_key) is True
+
+        refreshed = store._entries[entry.session_key]
+        assert refreshed.suspended is True
+        assert refreshed.resume_pending is False
+        assert refreshed.resume_reason is None
+        assert refreshed.last_resume_marked_at is None
+        assert refreshed.working_memory is None
+
     def test_custom_reason_persists(self, tmp_path):
         store = _make_store(tmp_path)
         source = _make_source()
@@ -288,6 +307,20 @@ class TestClearResumePending:
         assert e.resume_reason is None
         assert e.last_resume_marked_at is None
 
+    def test_clear_resume_pending_preserves_working_memory(self, tmp_path):
+        store = _make_store(tmp_path)
+        source = _make_source()
+        entry = store.get_or_create_session(source)
+        wm = {"awaiting_confirmation": True, "active_topic": "article-gap-plan"}
+        store.update_session(entry.session_key, working_memory=wm)
+        store.mark_resume_pending(entry.session_key)
+
+        assert store.clear_resume_pending(entry.session_key) is True
+
+        e = store._entries[entry.session_key]
+        assert e.resume_pending is False
+        assert e.working_memory == wm
+
     def test_returns_false_when_not_pending(self, tmp_path):
         store = _make_store(tmp_path)
         source = _make_source()
@@ -321,6 +354,26 @@ class TestGetOrCreateResumePending:
         # Flag is NOT cleared on read — only on successful turn completion.
         assert second.resume_pending is True
 
+    def test_resume_pending_preserves_working_memory_snapshot(self, tmp_path):
+        store = _make_store(tmp_path)
+        source = _make_source()
+        first = store.get_or_create_session(source)
+        wm = {
+            "last_assistant_actionable": "Desenhar a arquitetura proposta.",
+            "awaiting_confirmation": True,
+            "pending_proposals": [
+                {"proposal_id": "p1", "text": "Desenhar a arquitetura proposta."}
+            ],
+        }
+        store.update_session(first.session_key, working_memory=wm)
+        store.mark_resume_pending(first.session_key)
+
+        resumed = store.get_or_create_session(source)
+
+        assert resumed.session_id == first.session_id
+        assert resumed.resume_pending is True
+        assert resumed.working_memory == wm
+
     def test_suspended_still_creates_new_session(self, tmp_path):
         """Regression guard — suspended must still force a clean slate."""
         store = _make_store(tmp_path)
@@ -333,6 +386,25 @@ class TestGetOrCreateResumePending:
         assert second.session_id != original_sid
         assert second.was_auto_reset is True
         assert second.auto_reset_reason == "suspended"
+        assert second.working_memory is None
+
+    def test_suspended_reset_drops_previous_working_memory(self, tmp_path):
+        store = _make_store(tmp_path)
+        source = _make_source()
+        first = store.get_or_create_session(source)
+        store.update_session(
+            first.session_key,
+            working_memory={
+                "last_assistant_actionable": "Retomar a análise anterior.",
+                "awaiting_confirmation": True,
+            },
+        )
+        store.suspend_session(first.session_key)
+
+        reset_entry = store.get_or_create_session(source)
+
+        assert reset_entry.session_id != first.session_id
+        assert reset_entry.working_memory is None
 
     def test_suspended_overrides_resume_pending(self, tmp_path):
         """Terminal escalation: a session that somehow has BOTH flags must

@@ -936,6 +936,8 @@ class AIAgent:
         chat_type: str = None,
         thread_id: str = None,
         gateway_session_key: str = None,
+        previous_session_id: str = None,
+        previous_session_working_memory: Dict[str, Any] | None = None,
         skip_context_files: bool = False,
         load_soul_identity: bool = False,
         skip_memory: bool = False,
@@ -1014,6 +1016,8 @@ class AIAgent:
         self._chat_type = chat_type
         self._thread_id = thread_id
         self._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
+        self._previous_session_id = previous_session_id
+        self._previous_session_working_memory = dict(previous_session_working_memory or {})
         # Pluggable print function — CLI replaces this with _cprint so that
         # raw ANSI status lines are routed through prompt_toolkit's renderer
         # instead of going directly to stdout where patch_stdout's StdoutProxy
@@ -1167,6 +1171,7 @@ class AIAgent:
         # existing tool message rather than inserting a new user turn).
         self._pending_steer: Optional[str] = None
         self._pending_steer_lock = threading.Lock()
+        self._lcm_runtime_state: Dict[str, Any] = {}
 
         # Concurrent-tool worker thread tracking.  `_execute_tool_calls_concurrent`
         # runs each tool on its own ThreadPoolExecutor worker — those worker
@@ -1682,6 +1687,12 @@ class AIAgent:
                         memory_char_limit=mem_config.get("memory_char_limit", 2200),
                         user_char_limit=mem_config.get("user_char_limit", 1375),
                     )
+                    if mem_config.get("write_gate_enabled", True):
+                        try:
+                            from agent.memory_ledger import BeliefLedger, MemoryWriteGate
+                            self._memory_store.write_gate = MemoryWriteGate(BeliefLedger())
+                        except Exception as _wge:
+                            logger.debug("Memory write gate unavailable: %s", _wge)
                     self._memory_store.load_from_disk()
             except Exception:
                 pass  # Memory is optional -- don't break agent init
@@ -1734,6 +1745,8 @@ class AIAgent:
                         # Thread gateway session key for stable per-chat Honcho session isolation
                         if self._gateway_session_key:
                             _init_kwargs["gateway_session_key"] = self._gateway_session_key
+                        if self.session_working_memory:
+                            _init_kwargs["session_working_memory"] = dict(self.session_working_memory)
                         # Profile identity for per-profile provider scoping
                         try:
                             from hermes_cli.profiles import get_active_profile_name
@@ -4728,7 +4741,15 @@ class AIAgent:
         except Exception:
             pass
 
-        # 5. Close the OpenAI/httpx client
+        # 5. Shut down memory providers (flush queues / stop background threads)
+        try:
+            memory_manager = getattr(self, "_memory_manager", None)
+            if memory_manager is not None:
+                memory_manager.shutdown_all()
+        except Exception:
+            pass
+
+        # 6. Close the OpenAI/httpx client
         try:
             client = getattr(self, "client", None)
             if client is not None:
@@ -5211,6 +5232,14 @@ def _extract_text_content(content: Any) -> str:
         normalized = re.sub(r"\s+", " ", str(text or "")).strip().lower()
         if not normalized:
             return False
+
+        item_reference = re.search(
+            r"\b(itens?|op(ç|c)(õ|o)es?)\b[\s:,-]*(?:\d|primeira|primeiro|segunda|segundo|terceira|terceiro|quarta|quarto)(?:\b|\s+e\s+\d)",
+            normalized,
+        )
+        if item_reference and len(normalized) <= 48:
+            return True
+
         words = normalized.split()
         if len(normalized) > 48 or len(words) > 4:
             return False
@@ -5352,6 +5381,193 @@ def _extract_text_content(content: Any) -> str:
         return text or None
 
     @classmethod
+    def _message_looks_like_session_bridge_followup(cls, user_message: str) -> bool:
+        text = str(user_message or "").strip()
+        if not text:
+            return False
+        if cls._is_short_confirmation_message(text):
+            return True
+        normalized = re.sub(r"\s+", " ", text).strip().lower()
+        if re.search(r"\b(itens?|op(ç|c)(õ|o)es?|primeira|segunda|1|2|3|4)\b", normalized):
+            return True
+        return False
+
+    @classmethod
+    def _bridge_previous_session_working_memory(
+        cls,
+        user_message: str,
+        conversation_history: List[Dict[str, Any]] | None,
+        working_memory: Dict[str, Any] | None,
+        previous_working_memory: Dict[str, Any] | None,
+    ) -> Dict[str, Any]:
+        current = dict(working_memory or {}) if isinstance(working_memory, dict) else {}
+        if current:
+            return current
+        if conversation_history:
+            return current
+        if not isinstance(previous_working_memory, dict) or not previous_working_memory:
+            return current
+        if not cls._message_looks_like_session_bridge_followup(user_message):
+            return current
+        return dict(previous_working_memory)
+
+    @staticmethod
+    def _extract_recent_turn_lcm_state(working_memory: Dict[str, Any] | None) -> Dict[str, Any]:
+        if not isinstance(working_memory, dict):
+            return {}
+        state = working_memory.get("lcm_recent_turn")
+        return dict(state) if isinstance(state, dict) else {}
+
+    @classmethod
+    def _build_recent_turn_scorecard(cls, working_memory: Dict[str, Any] | None) -> Dict[str, Any]:
+        state = cls._extract_recent_turn_lcm_state(working_memory)
+        counters = state.get("workflow_counters") if isinstance(state.get("workflow_counters"), dict) else {}
+        workflows: Dict[str, Any] = {}
+        total_success = 0
+        total_failure = 0
+        for workflow, counts in counters.items():
+            if not isinstance(counts, dict):
+                continue
+            success = int(counts.get("success", 0) or 0)
+            failure = int(counts.get("failure", 0) or 0)
+            total = success + failure
+            total_success += success
+            total_failure += failure
+            workflows[workflow] = {
+                "success": success,
+                "failure": failure,
+                "total": total,
+                "success_rate_pct": round((success / total) * 100, 1) if total else None,
+            }
+        total_events = total_success + total_failure
+        if total_failure:
+            continuity_health = "degraded"
+        elif total_success:
+            continuity_health = "ok"
+        else:
+            continuity_health = "never"
+        return {
+            "overall": {
+                "success": total_success,
+                "failure": total_failure,
+                "total": total_events,
+                "success_rate_pct": round((total_success / total_events) * 100, 1) if total_events else None,
+            },
+            "workflows": workflows,
+            "continuity_health": continuity_health,
+        }
+
+    @classmethod
+    def _initialize_recent_turn_lcm_state(
+        cls,
+        working_memory: Dict[str, Any] | None,
+    ) -> Dict[str, Any]:
+        base = dict(working_memory or {}) if isinstance(working_memory, dict) else {}
+        if isinstance(base.get("lcm_recent_turn"), dict):
+            return base
+        state = {
+            "workflow_counters": {},
+            "recent_workflow_events": [],
+            "proof_surface": {
+                "has_actionable_context": bool(base.get("last_assistant_actionable") or base.get("pending_proposals")),
+                "awaiting_confirmation": bool(base.get("awaiting_confirmation")),
+                "ambiguity_requires_clarification": bool(base.get("ambiguity_requires_clarification")),
+            },
+        }
+        state["scorecard"] = cls._build_recent_turn_scorecard({"lcm_recent_turn": state})
+        base["lcm_recent_turn"] = state
+        return base
+
+    @classmethod
+    def _record_recent_turn_workflow_event(
+        cls,
+        working_memory: Dict[str, Any] | None,
+        workflow: str,
+        outcome: str,
+        *,
+        failure_class: str | None = None,
+        details: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        base = dict(working_memory or {}) if isinstance(working_memory, dict) else {}
+        state = cls._extract_recent_turn_lcm_state(base)
+        counters = state.get("workflow_counters") if isinstance(state.get("workflow_counters"), dict) else {}
+        events = state.get("recent_workflow_events") if isinstance(state.get("recent_workflow_events"), list) else []
+        counters = {name: dict(value) for name, value in counters.items() if isinstance(value, dict)}
+        events = [dict(item) for item in events if isinstance(item, dict)]
+        workflow_counts = counters.setdefault(workflow, {"success": 0, "failure": 0})
+        workflow_counts["success" if outcome == "success" else "failure"] += 1
+        events.append({
+            "workflow": workflow,
+            "outcome": outcome,
+            "failure_class": failure_class,
+            "details": details or {},
+        })
+        state["workflow_counters"] = counters
+        state["recent_workflow_events"] = events[-20:]
+        state["scorecard"] = cls._build_recent_turn_scorecard({"lcm_recent_turn": state})
+        base["lcm_recent_turn"] = state
+        return base
+
+    def _build_runtime_lcm_scorecard(self) -> Dict[str, Any]:
+        counters = self._lcm_runtime_state.get("workflow_counters") if isinstance(self._lcm_runtime_state, dict) else {}
+        counters = counters if isinstance(counters, dict) else {}
+        workflows: Dict[str, Any] = {}
+        total_success = 0
+        total_failure = 0
+        for workflow, counts in counters.items():
+            if not isinstance(counts, dict):
+                continue
+            success = int(counts.get("success", 0) or 0)
+            failure = int(counts.get("failure", 0) or 0)
+            total = success + failure
+            total_success += success
+            total_failure += failure
+            workflows[workflow] = {
+                "success": success,
+                "failure": failure,
+                "total": total,
+                "success_rate_pct": round((success / total) * 100, 1) if total else None,
+            }
+        total_events = total_success + total_failure
+        runtime_health = "degraded" if total_failure else ("ok" if total_success else "never")
+        return {
+            "overall": {
+                "success": total_success,
+                "failure": total_failure,
+                "total": total_events,
+                "success_rate_pct": round((total_success / total_events) * 100, 1) if total_events else None,
+            },
+            "workflows": workflows,
+            "runtime_health": runtime_health,
+        }
+
+    def _record_runtime_workflow_event(
+        self,
+        workflow: str,
+        outcome: str,
+        *,
+        failure_class: str | None = None,
+        details: Dict[str, Any] | None = None,
+    ) -> None:
+        counters = self._lcm_runtime_state.get("workflow_counters") if isinstance(self._lcm_runtime_state, dict) else {}
+        events = self._lcm_runtime_state.get("recent_workflow_events") if isinstance(self._lcm_runtime_state, dict) else []
+        counters = {name: dict(value) for name, value in counters.items() if isinstance(value, dict)} if isinstance(counters, dict) else {}
+        events = [dict(item) for item in events if isinstance(item, dict)] if isinstance(events, list) else []
+        workflow_counts = counters.setdefault(workflow, {"success": 0, "failure": 0})
+        workflow_counts["success" if outcome == "success" else "failure"] += 1
+        events.append({
+            "workflow": workflow,
+            "outcome": outcome,
+            "failure_class": failure_class,
+            "details": details or {},
+        })
+        self._lcm_runtime_state = {
+            "workflow_counters": counters,
+            "recent_workflow_events": events[-20:],
+        }
+        self._lcm_runtime_state["scorecard"] = self._build_runtime_lcm_scorecard()
+
+    @classmethod
     def _apply_recent_turn_binding(
         cls,
         user_message: str,
@@ -5485,23 +5701,28 @@ def _extract_text_content(content: Any) -> str:
     ) -> Dict[str, Any]:
         consumed = cls._apply_user_message_to_working_memory(user_message, prior_working_memory)
         rebuilt = cls._build_recent_turn_working_memory(messages)
-        return rebuilt or consumed
+        merged = rebuilt or consumed
+        telemetry = cls._extract_recent_turn_lcm_state(prior_working_memory)
+        if telemetry:
+            merged = dict(merged or {})
+            merged["lcm_recent_turn"] = telemetry
+        return merged
 
     @classmethod
     def _build_recent_turn_working_memory(cls, messages: List[Dict[str, Any]] | None) -> Dict[str, Any]:
         proposals = cls._extract_recent_assistant_actionables(messages, limit=3)
         if not proposals:
-            return {}
+            return cls._initialize_recent_turn_lcm_state({})
         primary = proposals[0]
         normalized = re.sub(r"\s+", " ", primary["text"]).strip()
         topic = normalized[:160]
-        return {
+        return cls._initialize_recent_turn_lcm_state({
             "last_assistant_actionable": primary["text"],
             "awaiting_confirmation": True,
             "active_topic": topic,
             "pending_proposals": proposals,
             "ambiguity_requires_clarification": len(proposals) > 1,
-        }
+        })
 
     @staticmethod
     def _cap_delegate_task_calls(tool_calls: list) -> list:
@@ -7779,6 +8000,12 @@ def _extract_text_content(content: Any) -> str:
                 logging.warning(
                     "Fallback to %s failed: provider not configured",
                     fb_provider)
+                self._record_runtime_workflow_event(
+                    "fallback_activation",
+                    "failure",
+                    failure_class="provider_not_configured",
+                    details={"provider": fb_provider, "model": fb_model},
+                )
                 return self._try_activate_fallback()  # try next in chain
             try:
                 from hermes_cli.model_normalize import normalize_model_for_provider
@@ -7912,9 +8139,24 @@ def _extract_text_content(content: Any) -> str:
                 "Fallback activated: %s → %s (%s)",
                 old_model, fb_model, fb_provider,
             )
+            self._record_runtime_workflow_event(
+                "fallback_activation",
+                "success",
+                details={
+                    "from_model": old_model,
+                    "to_model": fb_model,
+                    "provider": fb_provider,
+                },
+            )
             return True
         except Exception as e:
             logging.error("Failed to activate fallback %s: %s", fb_model, e)
+            self._record_runtime_workflow_event(
+                "fallback_activation",
+                "failure",
+                failure_class="activation_exception",
+                details={"provider": fb_provider, "model": fb_model, "error": str(e)},
+            )
             return self._try_activate_fallback()  # try next in chain
 
     # ── Per-turn primary restoration ─────────────────────────────────────
@@ -10609,14 +10851,65 @@ def _extract_text_content(content: Any) -> str:
         # such as "sim" / "continue" / "faça", anchor it to the latest
         # assistant actionable proposal from the transcript tail. Keep the
         # persisted transcript unchanged via persist_user_message.
+        turn_working_memory = dict(self.session_working_memory or {})
+        turn_working_memory = self._bridge_previous_session_working_memory(
+            original_user_message,
+            conversation_history,
+            turn_working_memory,
+            getattr(self, "_previous_session_working_memory", None),
+        )
+        _resolved_selection = self._resolve_proposal_selection(
+            original_user_message,
+            turn_working_memory,
+        )
         _disambiguation_response = self._maybe_build_disambiguation_response(
             original_user_message,
-            self.session_working_memory,
+            turn_working_memory,
         )
+        if _disambiguation_response:
+            turn_working_memory = self._record_recent_turn_workflow_event(
+                turn_working_memory,
+                "ambiguity_resolution",
+                "success",
+                details={"mode": "prompt"},
+            )
+        elif _resolved_selection:
+            turn_working_memory = self._record_recent_turn_workflow_event(
+                turn_working_memory,
+                "ambiguity_resolution",
+                "success",
+                details={
+                    "mode": "selection",
+                    "proposal_id": _resolved_selection.get("proposal_id"),
+                },
+            )
+        elif self._is_short_confirmation_message(original_user_message):
+            if turn_working_memory.get("awaiting_confirmation") and not turn_working_memory.get("ambiguity_requires_clarification"):
+                _actionable_from_working_memory = self._extract_actionable_from_working_memory(turn_working_memory)
+                _actionable_from_history = None
+                if not _actionable_from_working_memory:
+                    _actionable_from_history = self._extract_recent_assistant_actionable(conversation_history)
+                if _actionable_from_working_memory or _actionable_from_history:
+                    turn_working_memory = self._record_recent_turn_workflow_event(
+                        turn_working_memory,
+                        "short_confirmation_binding",
+                        "success",
+                        details={
+                            "source": "working_memory" if _actionable_from_working_memory else "history",
+                        },
+                    )
+                else:
+                    turn_working_memory = self._record_recent_turn_workflow_event(
+                        turn_working_memory,
+                        "short_confirmation_binding",
+                        "failure",
+                        failure_class="missing_actionable_context",
+                        details={"awaiting_confirmation": True},
+                    )
         user_message = self._apply_recent_turn_binding(
             user_message,
             conversation_history,
-            self.session_working_memory,
+            turn_working_memory,
         )
 
         # Track memory nudge trigger (turn-based, checked here).
@@ -10640,7 +10933,7 @@ def _extract_text_content(content: Any) -> str:
         if _disambiguation_response:
             messages.append({"role": "assistant", "content": _disambiguation_response})
             updated_working_memory = self._merge_recent_turn_working_memory(
-                self.session_working_memory,
+                turn_working_memory,
                 original_user_message,
                 messages,
             )
@@ -10868,7 +11161,11 @@ def _extract_text_content(content: Any) -> str:
         if self._memory_manager:
             try:
                 _turn_msg = original_user_message if isinstance(original_user_message, str) else ""
-                self._memory_manager.on_turn_start(self._user_turn_count, _turn_msg)
+                self._memory_manager.on_turn_start(
+                    self._user_turn_count,
+                    _turn_msg,
+                    working_memory=dict(self.session_working_memory or {}),
+                )
             except Exception:
                 pass
 
@@ -13936,7 +14233,7 @@ def _extract_text_content(content: Any) -> str:
             "cost_status": self.session_cost_status,
             "cost_source": self.session_cost_source,
             "session_working_memory": self._merge_recent_turn_working_memory(
-                self.session_working_memory,
+                turn_working_memory,
                 original_user_message,
                 messages,
             ),

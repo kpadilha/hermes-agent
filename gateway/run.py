@@ -5722,11 +5722,20 @@ class GatewayRunner:
             # Token counts and model are now persisted by the agent directly.
             # Keep only last_prompt_tokens here for context-window tracking and
             # compression decisions.
+            updated_working_memory = agent_result.get("session_working_memory") or {}
             self.session_store.update_session(
                 session_entry.session_key,
                 last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
-                working_memory=agent_result.get("session_working_memory") or {},
+                working_memory=updated_working_memory,
             )
+            try:
+                from gateway.status import write_runtime_status
+
+                write_runtime_status(
+                    lcm_recent_turn=updated_working_memory.get("lcm_recent_turn"),
+                )
+            except Exception:
+                logger.debug("Failed to persist recent-turn runtime status", exc_info=True)
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
@@ -10666,6 +10675,8 @@ class GatewayRunner:
 
         _session_entry = self.session_store.get_or_create_session(source) if session_key else None
         _session_working_memory = dict(getattr(_session_entry, "working_memory", {}) or {})
+        _previous_session_working_memory = dict(getattr(_session_entry, "previous_working_memory", {}) or {})
+        _previous_session_id = getattr(_session_entry, "previous_session_id", None)
 
         def _run_still_current() -> bool:
             if run_generation is None or not session_key:
@@ -11328,6 +11339,8 @@ class GatewayRunner:
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                     session_working_memory=_session_working_memory,
+                    previous_session_id=_previous_session_id,
+                    previous_session_working_memory=_previous_session_working_memory,
                 )
                 if _cache_lock and _cache is not None:
                     with _cache_lock:

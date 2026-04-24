@@ -120,6 +120,7 @@ class MemoryStore:
         self.user_entries: List[str] = []
         self.memory_char_limit = memory_char_limit
         self.user_char_limit = user_char_limit
+        self.write_gate = None
         # Frozen snapshot for system prompt -- set once at load_from_disk()
         self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
 
@@ -264,7 +265,14 @@ class MemoryStore:
             self._set_entries(target, entries)
             self.save_to_disk(target)
 
-        return self._success_response(target, "Entry added.")
+        response = self._success_response(target, "Entry added.")
+        self._attach_write_gate_decision(
+            response,
+            action="add",
+            target=target,
+            content=content,
+        )
+        return response
 
     def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
         """Find entry containing old_text substring, replace it with new_content."""
@@ -302,6 +310,7 @@ class MemoryStore:
                 # All identical -- safe to replace just the first
 
             idx = matches[0][0]
+            old_entry = entries[idx]
             limit = self._char_limit(target)
 
             # Check that replacement doesn't blow the budget
@@ -322,7 +331,15 @@ class MemoryStore:
             self._set_entries(target, entries)
             self.save_to_disk(target)
 
-        return self._success_response(target, "Entry replaced.")
+        response = self._success_response(target, "Entry replaced.")
+        self._attach_write_gate_decision(
+            response,
+            action="replace",
+            target=target,
+            content=new_content,
+            old_content=old_entry,
+        )
+        return response
 
     def remove(self, target: str, old_text: str) -> Dict[str, Any]:
         """Remove the entry containing old_text substring."""
@@ -389,6 +406,38 @@ class MemoryStore:
         if message:
             resp["message"] = message
         return resp
+
+    def _attach_write_gate_decision(
+        self,
+        response: Dict[str, Any],
+        *,
+        action: str,
+        target: str,
+        content: str,
+        old_content: str = "",
+    ) -> None:
+        """Attach a structured local write-gate decision when configured.
+
+        The gate is best-effort: file-backed prompt memory remains the source
+        action for compatibility, while the ledger adds auditable structure.
+        """
+        if self.write_gate is None:
+            return
+        try:
+            decision = self.write_gate.evaluate_and_record(
+                target=target,
+                content=content,
+                old_content=old_content,
+                source=f"memory_tool:{action}:{target}",
+                evidence_ref=f"memory:{self._path_for(target).name}#{action}",
+            )
+            response["memory_write_gate"] = decision
+        except Exception as e:
+            logger.warning("Memory write gate failed for %s/%s: %s", action, target, e)
+            response["memory_write_gate"] = {
+                "operation": "ERROR",
+                "reason": str(e),
+            }
 
     def _render_block(self, target: str, entries: List[str]) -> str:
         """Render a system prompt block with header and usage indicator."""

@@ -488,6 +488,12 @@ class SessionEntry:
     # drifting to semantically adjacent older context.
     working_memory: Optional[Dict[str, Any]] = None
 
+    # Bridge to the immediately previous session lane for the same chat.
+    # Used when auto-reset creates a fresh session_id but the user's first
+    # message is still an elliptical continuation of the prior conversation.
+    previous_session_id: Optional[str] = None
+    previous_working_memory: Optional[Dict[str, Any]] = None
+
     def to_dict(self) -> Dict[str, Any]:
         result = {
             "session_key": self.session_key,
@@ -515,6 +521,8 @@ class SessionEntry:
                 else None
             ),
             "working_memory": self.working_memory or None,
+            "previous_session_id": self.previous_session_id,
+            "previous_working_memory": self.previous_working_memory or None,
         }
         if self.origin:
             result["origin"] = self.origin.to_dict()
@@ -564,6 +572,8 @@ class SessionEntry:
             resume_reason=data.get("resume_reason"),
             last_resume_marked_at=last_resume_marked_at,
             working_memory=data.get("working_memory") or None,
+            previous_session_id=data.get("previous_session_id"),
+            previous_working_memory=data.get("previous_working_memory") or None,
         )
 
 
@@ -899,11 +909,15 @@ class SessionStore:
                     auto_reset_reason = reset_reason
                     # Track whether the expired session had any real conversation
                     reset_had_activity = entry.total_tokens > 0
+                    previous_session_id = entry.session_id
+                    previous_working_memory = dict(entry.working_memory) if isinstance(entry.working_memory, dict) else None
                     db_end_session_id = entry.session_id
             else:
                 was_auto_reset = False
                 auto_reset_reason = None
                 reset_had_activity = False
+                previous_session_id = None
+                previous_working_memory = None
 
             # Create new session
             session_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -920,6 +934,8 @@ class SessionStore:
                 was_auto_reset=was_auto_reset,
                 auto_reset_reason=auto_reset_reason,
                 reset_had_activity=reset_had_activity,
+                previous_session_id=previous_session_id,
+                previous_working_memory=previous_working_memory,
             )
 
             self._entries[session_key] = entry
@@ -962,6 +978,8 @@ class SessionStore:
                     entry.last_prompt_tokens = last_prompt_tokens
                 if working_memory is not None:
                     entry.working_memory = working_memory
+                    entry.previous_session_id = None
+                    entry.previous_working_memory = None
                 self._save()
 
     def suspend_session(self, session_key: str) -> bool:
@@ -970,11 +988,20 @@ class SessionStore:
         Used by ``/stop`` to prevent stuck sessions from being resumed
         after a gateway restart (#7536).  Returns True if the session
         existed and was marked.
+
+        Suspending is a hard forced-wipe signal, so any resumability flags
+        and recent-turn working memory are cleared immediately instead of
+        lingering until the next ``get_or_create_session()`` call.
         """
         with self._lock:
             self._ensure_loaded_locked()
             if session_key in self._entries:
-                self._entries[session_key].suspended = True
+                entry = self._entries[session_key]
+                entry.suspended = True
+                entry.resume_pending = False
+                entry.resume_reason = None
+                entry.last_resume_marked_at = None
+                entry.working_memory = None
                 self._save()
                 return True
         return False
@@ -1143,6 +1170,8 @@ class SessionStore:
                 display_name=old_entry.display_name,
                 platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
+                previous_session_id=old_entry.session_id,
+                previous_working_memory=dict(old_entry.working_memory) if isinstance(old_entry.working_memory, dict) else None,
             )
 
             self._entries[session_key] = new_entry

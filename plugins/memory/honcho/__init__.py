@@ -20,6 +20,7 @@ import logging
 import re
 import threading
 import time
+from collections import deque
 from typing import Any, Dict, List, Optional
 
 from agent.memory_manager import sanitize_context
@@ -180,8 +181,34 @@ CONCLUDE_SCHEMA = {
     },
 }
 
+AUDIT_SCHEMA = {
+    "name": "honcho_memory_audit",
+    "description": (
+        "Audit the current memory-consistency state for a peer. Returns the live Honcho peer card, "
+        "the local USER.md entries, a session working-memory snapshot when available, and divergence flags."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "peer": {
+                "type": "string",
+                "description": "Peer to audit. Built-in aliases: 'user' (default), 'ai'. Or pass any peer ID from this workspace.",
+            }
+        },
+        "required": [],
+    },
+}
 
-ALL_TOOL_SCHEMAS = [PROFILE_SCHEMA, SEARCH_SCHEMA, REASONING_SCHEMA, CONTEXT_SCHEMA, CONCLUDE_SCHEMA]
+
+ALL_TOOL_SCHEMAS = [PROFILE_SCHEMA, SEARCH_SCHEMA, REASONING_SCHEMA, CONTEXT_SCHEMA, CONCLUDE_SCHEMA, AUDIT_SCHEMA]
+
+MEMORY_WORKFLOW_FAILURE_CLASSES = {
+    "profile_mirror_divergence": "peer card differs from USER.md projection",
+    "false_empty_profile": "profile read returned empty while a target card exists",
+    "memory_sync_failed": "sync from USER.md to peer card failed",
+    "memory_audit_failed": "audit surface could not inspect current memory state",
+    "cross_surface_validation_failed": "post-write readback did not match expected memory surfaces",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +258,13 @@ class HonchoMemoryProvider(MemoryProvider):
 
         # Port #4053: cron guard — when True, plugin is fully inactive
         self._cron_skipped = False
+        self._last_user_memory_sync_at: float = 0.0
+        self._last_user_memory_sync_status: str = "never"
+        self._last_user_memory_sync_error: str = ""
+        self._last_user_memory_sync_validation: Dict[str, Any] = {}
+        self._runtime_working_memory: Dict[str, Any] = {}
+        self._workflow_events = deque(maxlen=50)
+        self._workflow_counters: Dict[str, Dict[str, int]] = {}
 
     @property
     def name(self) -> str:
@@ -298,6 +332,7 @@ class HonchoMemoryProvider(MemoryProvider):
                 return
 
             self._config = cfg
+            self._runtime_working_memory = dict(kwargs.get("session_working_memory") or {})
 
             # ----- B1: recall_mode from config -----
             self._recall_mode = cfg.recall_mode  # "context", "tools", or "hybrid"
@@ -398,6 +433,24 @@ class HonchoMemoryProvider(MemoryProvider):
                 )
         except Exception as e:
             logger.debug("Honcho memory file migration skipped: %s", e)
+
+        # ----- B6.5: User-profile mirror reconciliation -----
+        # The compact user profile in USER.md is the authoritative source for
+        # the fast Honcho peer-card surface. Reconcile it on session init so
+        # previously stale cards are healed even when no new memory write
+        # happens during the current session.
+        try:
+            sync_result = self._sync_user_profile_from_local_memory()
+            if sync_result.get("ok"):
+                logger.debug("Honcho user-profile mirror reconciled at init: %s", self._session_key)
+            elif sync_result.get("entries"):
+                logger.debug(
+                    "Honcho user-profile mirror remains divergent at init for %s: %s",
+                    self._session_key,
+                    sync_result.get("error") or "unknown sync error",
+                )
+        except Exception as e:
+            logger.debug("Honcho user-profile mirror reconcile skipped: %s", e)
 
         # ----- B7: Pre-warming at init -----
         # Context prewarm warms peer.context() (base layer), consumed via
@@ -1012,8 +1065,192 @@ class HonchoMemoryProvider(MemoryProvider):
         return False
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
-        """Track turn count for cadence and injection_frequency logic."""
+        """Track turn count for cadence and keep the last working-memory snapshot."""
         self._turn_count = turn_number
+        self._runtime_working_memory = dict(kwargs.get("working_memory") or {})
+
+    def _record_workflow_event(
+        self,
+        workflow: str,
+        outcome: str,
+        *,
+        failure_class: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        event = {
+            "ts": time.time(),
+            "workflow": workflow,
+            "outcome": outcome,
+            "failure_class": failure_class,
+            "details": details or {},
+        }
+        self._workflow_events.append(event)
+        counters = self._workflow_counters.setdefault(workflow, {"success": 0, "failure": 0})
+        counters["success" if outcome == "success" else "failure"] += 1
+        self._persist_memory_runtime_status()
+
+    def _persist_memory_runtime_status(self) -> None:
+        payload = {
+            "workflow_counters": dict(self._workflow_counters),
+            "recent_workflow_events": list(self._workflow_events),
+            "scorecard": self._build_memory_scorecard(),
+        }
+        try:
+            from gateway.status import write_runtime_status
+
+            write_runtime_status(lcm_memory=payload)
+        except Exception:
+            logger.debug("Failed to persist memory runtime status", exc_info=True)
+
+    def _build_memory_scorecard(self) -> dict[str, Any]:
+        """Summarize current memory workflow reliability in a compact scorecard."""
+        workflows: dict[str, Any] = {}
+        total_success = 0
+        total_failure = 0
+        for workflow, counts in self._workflow_counters.items():
+            success = int(counts.get("success", 0))
+            failure = int(counts.get("failure", 0))
+            total = success + failure
+            total_success += success
+            total_failure += failure
+            success_rate = round((success / total) * 100, 1) if total else None
+            workflows[workflow] = {
+                "success": success,
+                "failure": failure,
+                "total": total,
+                "success_rate_pct": success_rate,
+            }
+        total_events = total_success + total_failure
+        overall_success_rate = round((total_success / total_events) * 100, 1) if total_events else None
+        if self._last_user_memory_sync_status in ("ok", "never"):
+            sync_health = self._last_user_memory_sync_status
+        else:
+            sync_health = "degraded"
+        return {
+            "overall": {
+                "success": total_success,
+                "failure": total_failure,
+                "total": total_events,
+                "success_rate_pct": overall_success_rate,
+            },
+            "workflows": workflows,
+            "memory_sync_health": sync_health,
+        }
+
+    def _sync_user_profile_from_local_memory(self) -> dict[str, Any]:
+        """Re-sync the fast Honcho user profile surface from local USER.md."""
+        result = {
+            "ok": False,
+            "entries": [],
+            "error": "",
+        }
+        if not self._manager or not self._session_key:
+            result["error"] = "Honcho session not initialized."
+            return result
+
+        try:
+            from tools.memory_tool import MemoryStore, get_memory_dir
+
+            user_entries = MemoryStore._read_file(get_memory_dir() / "USER.md")
+            result["entries"] = user_entries
+            if user_entries:
+                self._manager.set_peer_card(self._session_key, user_entries, peer="user")
+            readback_card = self._manager.get_peer_card(self._session_key, peer="user")
+            card_matches_local = set(readback_card) == set(user_entries)
+            conclusions = self._manager.list_conclusions(self._session_key, peer="user")
+            conclusion_contents = {
+                str(item.get("content", "")).strip()
+                for item in conclusions
+                if str(item.get("content", "")).strip()
+            }
+            missing_as_conclusions = sorted(set(user_entries) - conclusion_contents)
+            validation = {
+                "card_matches_local": card_matches_local,
+                "missing_as_conclusions": missing_as_conclusions,
+                "readback_card": readback_card,
+                "conclusion_count": len(conclusions),
+            }
+            self._last_user_memory_sync_validation = validation
+            self._last_user_memory_sync_at = time.time()
+            self._last_user_memory_sync_status = "ok" if card_matches_local else "validation_failed"
+            self._last_user_memory_sync_error = "" if card_matches_local else "peer card readback diverged from USER.md"
+            self._record_workflow_event(
+                "memory_write_propagation",
+                "success" if card_matches_local else "failure",
+                failure_class=None if card_matches_local else "cross_surface_validation_failed",
+                details={"entry_count": len(user_entries), **validation},
+            )
+            result["validation"] = validation
+            result["ok"] = card_matches_local
+            if not card_matches_local:
+                result["error"] = self._last_user_memory_sync_error
+            return result
+        except Exception as e:
+            self._last_user_memory_sync_at = time.time()
+            self._last_user_memory_sync_status = "error"
+            self._last_user_memory_sync_error = str(e)
+            self._record_workflow_event(
+                "memory_write_propagation",
+                "failure",
+                failure_class="memory_sync_failed",
+                details={"error": str(e)},
+            )
+            result["error"] = str(e)
+            return result
+
+    def _build_memory_audit_payload(self, peer: str = "user") -> dict[str, Any]:
+        """Return a machine-readable snapshot of memory consistency state."""
+        payload: dict[str, Any] = {
+            "session_key": self._session_key,
+            "peer": peer,
+            "runtime_working_memory": dict(self._runtime_working_memory or {}),
+            "last_user_memory_sync": {
+                "status": self._last_user_memory_sync_status,
+                "at": self._last_user_memory_sync_at or None,
+                "error": self._last_user_memory_sync_error or None,
+                "validation": self._last_user_memory_sync_validation or {},
+            },
+        }
+        if not self._manager or not self._session_key:
+            payload["error"] = "Honcho is not active for this session."
+            return payload
+
+        local_entries: list[str] = []
+        try:
+            from tools.memory_tool import MemoryStore, get_memory_dir
+            local_entries = MemoryStore._read_file(get_memory_dir() / "USER.md")
+        except Exception as e:
+            payload["local_user_memory_error"] = str(e)
+
+        peer_card = self._manager.get_peer_card(self._session_key, peer=peer)
+        conclusions = self._manager.list_conclusions(self._session_key, peer=peer)
+        local_set = set(local_entries) if peer == "user" else set()
+        card_set = set(peer_card)
+        conclusion_contents = [
+            str(item.get("content", "")).strip()
+            for item in conclusions
+            if str(item.get("content", "")).strip()
+        ]
+        conclusion_set = set(conclusion_contents)
+        payload.update({
+            "local_user_memory_entries": local_entries if peer == "user" else [],
+            "honcho_peer_card": peer_card,
+            "honcho_conclusions": {
+                "count": len(conclusions),
+                "contents": conclusion_contents,
+            },
+            "workflow_counters": self._workflow_counters,
+            "recent_workflow_events": list(self._workflow_events),
+            "failure_taxonomy": MEMORY_WORKFLOW_FAILURE_CLASSES,
+            "scorecard": self._build_memory_scorecard(),
+            "divergence": {
+                "missing_in_honcho": sorted(local_set - card_set) if peer == "user" else [],
+                "extra_in_honcho": sorted(card_set - local_set) if peer == "user" else [],
+                "in_sync": (local_set == card_set) if peer == "user" else None,
+                "missing_as_conclusions": sorted(local_set - conclusion_set) if peer == "user" else [],
+            },
+        })
+        return payload
 
     @staticmethod
     def _chunk_message(content: str, limit: int) -> list[str]:
@@ -1157,14 +1394,8 @@ class HonchoMemoryProvider(MemoryProvider):
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Mirror built-in user profile writes as Honcho conclusions.
-
-        ``metadata`` is accepted for compatibility with the write-origin
-        work landed in main (commit 6a957a74); it's not yet threaded into
-        the Honcho conclusion payload.  Left as a follow-up so this PR
-        stays focused on the 7-PR consolidation and its review follow-ups.
-        """
-        if action != "add" or target != "user" or not content:
+        """Keep Honcho's fast user profile surface aligned with built-in USER.md."""
+        if action not in ("add", "replace") or target != "user" or not content:
             return
         if self._cron_skipped:
             return
@@ -1173,6 +1404,9 @@ class HonchoMemoryProvider(MemoryProvider):
 
         def _write():
             try:
+                sync_result = self._sync_user_profile_from_local_memory()
+                if not sync_result.get("ok"):
+                    raise RuntimeError(sync_result.get("error") or "user profile sync failed")
                 self._manager.create_conclusion(self._session_key, content)
             except Exception as e:
                 logger.debug("Honcho memory mirror failed: %s", e)
@@ -1229,7 +1463,18 @@ class HonchoMemoryProvider(MemoryProvider):
                     return json.dumps({"result": f"Peer card updated ({len(result)} facts).", "card": result})
                 card = self._manager.get_peer_card(self._session_key, peer=peer)
                 if not card:
+                    self._record_workflow_event(
+                        "honcho_profile_read",
+                        "failure",
+                        failure_class="false_empty_profile",
+                        details={"peer": peer},
+                    )
                     return json.dumps(self._empty_profile_hint(peer))
+                self._record_workflow_event(
+                    "honcho_profile_read",
+                    "success",
+                    details={"peer": peer, "fact_count": len(card)},
+                )
                 return json.dumps({"result": card})
 
             elif tool_name == "honcho_search":
@@ -1280,6 +1525,29 @@ class HonchoMemoryProvider(MemoryProvider):
                     )
                     parts.append(f"## Recent messages\n{msg_str}")
                 return json.dumps({"result": "\n\n".join(parts) or "No context available."})
+
+            elif tool_name == "honcho_memory_audit":
+                peer = args.get("peer", "user")
+                payload = self._build_memory_audit_payload(peer=peer)
+                divergence = payload.get("divergence") or {}
+                if divergence.get("in_sync") is False:
+                    self._record_workflow_event(
+                        "memory_audit",
+                        "failure",
+                        failure_class="profile_mirror_divergence",
+                        details={
+                            "peer": peer,
+                            "missing_in_honcho": divergence.get("missing_in_honcho", []),
+                            "extra_in_honcho": divergence.get("extra_in_honcho", []),
+                        },
+                    )
+                else:
+                    self._record_workflow_event(
+                        "memory_audit",
+                        "success",
+                        details={"peer": peer, "in_sync": divergence.get("in_sync")},
+                    )
+                return json.dumps(self._build_memory_audit_payload(peer=peer))
 
             elif tool_name == "honcho_conclude":
                 delete_id = (args.get("delete_id") or "").strip()

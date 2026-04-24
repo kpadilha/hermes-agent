@@ -91,7 +91,7 @@ class TestTryActivateFallback:
             fallback_model={"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
         )
         mock_client = _mock_resolve(
-            api_key="sk-or-fallback-key",
+            api_key="sk-or-...-key",
             base_url="https://openrouter.ai/api/v1",
         )
         with patch(
@@ -105,6 +105,9 @@ class TestTryActivateFallback:
             assert agent.provider == "openrouter"
             assert agent.api_mode == "chat_completions"
             assert agent.client is mock_client
+            telemetry = agent._lcm_runtime_state
+            assert telemetry["workflow_counters"]["fallback_activation"]["success"] == 1
+            assert telemetry["scorecard"]["runtime_health"] == "ok"
 
     def test_activates_zai_fallback(self):
         agent = _make_agent(
@@ -203,6 +206,10 @@ class TestTryActivateFallback:
         ):
             assert agent._try_activate_fallback() is False
             assert agent._fallback_activated is False
+            telemetry = agent._lcm_runtime_state
+            assert telemetry["workflow_counters"]["fallback_activation"]["failure"] == 1
+            assert telemetry["recent_workflow_events"][-1]["failure_class"] == "provider_not_configured"
+            assert telemetry["scorecard"]["runtime_health"] == "degraded"
 
     def test_custom_base_url(self):
         """Custom base_url in config should override the provider default."""

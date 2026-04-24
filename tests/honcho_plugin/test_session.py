@@ -1,8 +1,9 @@
 """Tests for plugins/memory/honcho/session.py — HonchoSession and helpers."""
 
+import json
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from plugins.memory.honcho.session import (
     HonchoSession,
@@ -376,6 +377,25 @@ class TestPeerLookupHelpers:
             "session_id": session.honcho_session_id,
         }])
 
+    def test_list_conclusions_returns_normalized_dicts(self):
+        mgr, session = self._make_cached_manager()
+        assistant_peer = MagicMock()
+        scope = MagicMock()
+        scope.list.return_value = [
+            {"id": "c1", "content": "User prefers dark mode", "session_id": session.honcho_session_id},
+            {"id": "c2", "content": "User likes concise replies", "session_id": session.honcho_session_id},
+        ]
+        assistant_peer.conclusions_of.return_value = scope
+        mgr._get_or_create_peer = MagicMock(return_value=assistant_peer)
+
+        result = mgr.list_conclusions(session.key)
+
+        assert result == [
+            {"id": "c1", "content": "User prefers dark mode", "session_id": session.honcho_session_id},
+            {"id": "c2", "content": "User likes concise replies", "session_id": session.honcho_session_id},
+        ]
+        assistant_peer.conclusions_of.assert_called_once_with(session.user_peer_id)
+
 
 class TestConcludeToolDispatch:
     def test_conclude_schema_has_no_anyof(self):
@@ -481,6 +501,130 @@ class TestConcludeToolDispatch:
             reasoning_level=None,
             peer="hermes",
         )
+
+    def test_honcho_memory_audit_reports_working_memory_and_divergence(self, tmp_path):
+        provider = HonchoMemoryProvider()
+        provider._session_initialized = True
+        provider._session_key = "telegram:123"
+        provider._manager = MagicMock()
+        provider._manager.get_peer_card.return_value = ["Name: Krishna"]
+        provider._manager.list_conclusions.return_value = [
+            {"id": "c1", "content": "Name: Krishna"},
+            {"id": "c2", "content": "Prefers direct answers"},
+        ]
+        provider._runtime_working_memory = {"awaiting_confirmation": True}
+        provider._last_user_memory_sync_status = "ok"
+        provider._last_user_memory_sync_at = 123.0
+
+        user_md = tmp_path / "USER.md"
+        user_md.write_text("Name: Krishna\n§\nPrefers direct answers\n", encoding="utf-8")
+
+        with patch("tools.memory_tool.get_memory_dir", return_value=tmp_path):
+            result = provider.handle_tool_call("honcho_memory_audit", {})
+
+        parsed = json.loads(result)
+        assert parsed["runtime_working_memory"] == {"awaiting_confirmation": True}
+        assert parsed["honcho_peer_card"] == ["Name: Krishna"]
+        assert parsed["honcho_conclusions"]["count"] == 2
+        assert parsed["honcho_conclusions"]["contents"] == ["Name: Krishna", "Prefers direct answers"]
+        assert parsed["divergence"]["missing_in_honcho"] == ["Prefers direct answers"]
+        assert parsed["divergence"]["extra_in_honcho"] == []
+        assert parsed["divergence"]["missing_as_conclusions"] == []
+        assert parsed["last_user_memory_sync"]["status"] == "ok"
+        assert parsed["last_user_memory_sync"]["validation"] == {}
+        assert parsed["workflow_counters"]["memory_audit"]["failure"] == 1
+        assert parsed["scorecard"]["overall"]["failure"] == 1
+        assert parsed["scorecard"]["workflows"]["memory_audit"]["success_rate_pct"] == 0.0
+        assert parsed["scorecard"]["memory_sync_health"] == "ok"
+        assert parsed["recent_workflow_events"][-1]["workflow"] == "memory_audit"
+        assert parsed["recent_workflow_events"][-1]["failure_class"] == "profile_mirror_divergence"
+        assert "memory_sync_failed" in parsed["failure_taxonomy"]
+
+    def test_honcho_on_memory_write_resyncs_user_profile_from_local_memory(self, tmp_path):
+        provider = HonchoMemoryProvider()
+        provider._session_key = "telegram:123"
+        provider._manager = MagicMock()
+        provider._manager.get_peer_card.return_value = ["Name: Krishna", "Prefers direct answers"]
+        provider._manager.list_conclusions.return_value = [
+            {"id": "c1", "content": "Name: Krishna"},
+            {"id": "c2", "content": "Prefers direct answers"},
+        ]
+        provider._cron_skipped = False
+
+        user_md = tmp_path / "USER.md"
+        user_md.write_text("Name: Krishna\n§\nPrefers direct answers\n", encoding="utf-8")
+
+        class ImmediateThread:
+            def __init__(self, target=None, daemon=None, name=None):
+                self._target = target
+            def start(self):
+                if self._target:
+                    self._target()
+
+        with patch("tools.memory_tool.get_memory_dir", return_value=tmp_path), \
+             patch("plugins.memory.honcho.__init__.threading.Thread", ImmediateThread):
+            provider.on_memory_write("replace", "user", "Prefers direct answers")
+
+        provider._manager.set_peer_card.assert_called_once_with(
+            "telegram:123",
+            ["Name: Krishna", "Prefers direct answers"],
+            peer="user",
+        )
+        provider._manager.get_peer_card.assert_called_once_with("telegram:123", peer="user")
+        provider._manager.list_conclusions.assert_called_once_with("telegram:123", peer="user")
+        provider._manager.create_conclusion.assert_called_once_with(
+            "telegram:123",
+            "Prefers direct answers",
+        )
+        assert provider._last_user_memory_sync_status == "ok"
+        assert provider._last_user_memory_sync_validation["card_matches_local"] is True
+        assert provider._last_user_memory_sync_validation["missing_as_conclusions"] == []
+        assert provider._workflow_counters["memory_write_propagation"]["success"] == 1
+        assert provider._workflow_events[-1]["workflow"] == "memory_write_propagation"
+        scorecard = provider._build_memory_scorecard()
+        assert scorecard["overall"]["success"] == 1
+        assert scorecard["workflows"]["memory_write_propagation"]["success_rate_pct"] == 100.0
+
+    def test_honcho_on_memory_write_marks_validation_failure_when_readback_diverges(self, tmp_path):
+        provider = HonchoMemoryProvider()
+        provider._session_key = "telegram:123"
+        provider._manager = MagicMock()
+        provider._manager.get_peer_card.return_value = ["Name: Krishna"]
+        provider._manager.list_conclusions.return_value = []
+        provider._cron_skipped = False
+
+        user_md = tmp_path / "USER.md"
+        user_md.write_text("Name: Krishna\n§\nPrefers direct answers\n", encoding="utf-8")
+
+        class ImmediateThread:
+            def __init__(self, target=None, daemon=None, name=None):
+                self._target = target
+            def start(self):
+                if self._target:
+                    self._target()
+
+        with patch("tools.memory_tool.get_memory_dir", return_value=tmp_path), \
+             patch("plugins.memory.honcho.__init__.threading.Thread", ImmediateThread):
+            provider.on_memory_write("replace", "user", "Prefers direct answers")
+
+        provider._manager.create_conclusion.assert_not_called()
+        assert provider._last_user_memory_sync_status == "validation_failed"
+        assert provider._last_user_memory_sync_validation["card_matches_local"] is False
+        assert provider._workflow_counters["memory_write_propagation"]["failure"] == 1
+        assert provider._workflow_events[-1]["failure_class"] == "cross_surface_validation_failed"
+        scorecard = provider._build_memory_scorecard()
+        assert scorecard["overall"]["failure"] == 1
+        assert scorecard["memory_sync_health"] == "degraded"
+
+    def test_honcho_on_turn_start_keeps_last_working_memory_snapshot(self):
+        provider = HonchoMemoryProvider()
+
+        provider.on_turn_start(7, "sim", working_memory={"pending_proposals": [{"proposal_id": "p1", "text": "Desenhar fluxo"}]})
+
+        assert provider._turn_count == 7
+        assert provider._runtime_working_memory == {
+            "pending_proposals": [{"proposal_id": "p1", "text": "Desenhar fluxo"}]
+        }
 
     def test_honcho_conclude_missing_both_params_returns_error(self):
         """Calling honcho_conclude with neither conclusion nor delete_id returns a tool error."""
@@ -696,6 +840,8 @@ class TestPerSessionMigrateGuard:
         mock_session = MagicMock()
         mock_session.messages = []  # empty = new session → triggers migration path
         mock_manager.get_or_create.return_value = mock_session
+        mock_manager.get_peer_card.return_value = []
+        mock_manager.set_peer_card.return_value = None
 
         with patch("plugins.memory.honcho.client.HonchoClientConfig.from_global_config", return_value=cfg), \
              patch("plugins.memory.honcho.client.get_honcho_client", return_value=MagicMock()), \
@@ -714,6 +860,119 @@ class TestPerSessionMigrateGuard:
         """per-directory strategy with empty session SHOULD call migrate_memory_files."""
         _, mock_manager = self._make_provider_with_strategy("per-directory")
         mock_manager.migrate_memory_files.assert_called_once()
+
+
+class TestUserCardSync:
+    def test_migration_syncs_user_md_into_honcho_user_card(self, tmp_path):
+        from plugins.memory.honcho.session import HonchoSession, HonchoSessionManager
+        from unittest.mock import MagicMock
+
+        user_md = tmp_path / "USER.md"
+        user_md.write_text("Name: Krishna\n§\nPrefers direct answers\n", encoding="utf-8")
+
+        mgr = HonchoSessionManager(honcho=MagicMock())
+        session = HonchoSession(
+            key="telegram:123",
+            user_peer_id="krishna",
+            assistant_peer_id="niko",
+            honcho_session_id="telegram-123",
+            messages=[],
+        )
+        mgr._cache[session.key] = session
+
+        honcho_session = MagicMock()
+        mgr._sessions_cache[session.honcho_session_id] = honcho_session
+
+        user_peer = MagicMock()
+        assistant_peer = MagicMock()
+        mgr._get_or_create_peer = MagicMock(side_effect=[user_peer, assistant_peer])
+
+        uploaded = mgr.migrate_memory_files(session.key, str(tmp_path))
+
+        assert uploaded is True
+        honcho_session.upload_file.assert_called_once()
+        user_peer.set_card.assert_called_once_with([
+            "Name: Krishna",
+            "Prefers direct answers",
+        ])
+
+    def test_on_memory_write_syncs_full_user_card_and_conclusion(self, tmp_path):
+        from unittest.mock import patch, MagicMock
+
+        user_md = tmp_path / "USER.md"
+        user_md.write_text("Name: Krishna\n§\nPrefers direct answers\n", encoding="utf-8")
+
+        provider = HonchoMemoryProvider()
+        provider._session_key = "telegram:123"
+        provider._manager = MagicMock()
+        provider._manager.get_peer_card.return_value = ["Name: Krishna", "Prefers direct answers"]
+        provider._manager.list_conclusions.return_value = [
+            {"id": "c1", "content": "Name: Krishna"},
+            {"id": "c2", "content": "Prefers direct answers"},
+        ]
+        provider._cron_skipped = False
+
+        class ImmediateThread:
+            def __init__(self, target=None, daemon=None, name=None):
+                self._target = target
+            def start(self):
+                if self._target:
+                    self._target()
+
+        with patch("tools.memory_tool.get_memory_dir", return_value=tmp_path), \
+             patch("plugins.memory.honcho.__init__.threading.Thread", ImmediateThread):
+            provider.on_memory_write("replace", "user", "Prefers direct answers")
+
+        provider._manager.set_peer_card.assert_called_once_with(
+            "telegram:123",
+            ["Name: Krishna", "Prefers direct answers"],
+            peer="user",
+        )
+        provider._manager.create_conclusion.assert_called_once_with(
+            "telegram:123",
+            "Prefers direct answers",
+        )
+
+    def test_initialize_reconciles_user_profile_mirror_from_user_md(self, tmp_path):
+        from plugins.memory.honcho.client import HonchoClientConfig
+        from unittest.mock import patch, MagicMock
+
+        user_md = tmp_path / "USER.md"
+        user_md.write_text("Name: Krishna\n§\nPrefers direct answers\n", encoding="utf-8")
+
+        cfg = HonchoClientConfig(
+            api_key="test-key",
+            enabled=True,
+            recall_mode="tools",
+            init_on_session_start=True,
+            session_strategy="per-session",
+        )
+
+        provider = HonchoMemoryProvider()
+        mock_manager = MagicMock()
+        mock_session = MagicMock()
+        mock_session.messages = []
+        mock_manager.get_or_create.return_value = mock_session
+        mock_manager.get_peer_card.return_value = ["Name: Krishna", "Prefers direct answers"]
+        mock_manager.list_conclusions.return_value = [
+            {"id": "c1", "content": "Name: Krishna"},
+            {"id": "c2", "content": "Prefers direct answers"},
+        ]
+
+        with patch("plugins.memory.honcho.client.HonchoClientConfig.from_global_config", return_value=cfg), \
+             patch("plugins.memory.honcho.client.get_honcho_client", return_value=MagicMock()), \
+             patch("plugins.memory.honcho.session.HonchoSessionManager", return_value=mock_manager), \
+             patch("tools.memory_tool.get_memory_dir", return_value=tmp_path), \
+             patch("hermes_constants.get_hermes_home", return_value=MagicMock()):
+            provider.initialize(session_id="test-session-001")
+
+        mock_manager.set_peer_card.assert_called_once_with(
+            "test-session-001",
+            ["Name: Krishna", "Prefers direct answers"],
+            peer="user",
+        )
+        assert provider._last_user_memory_sync_status == "ok"
+        assert provider._last_user_memory_sync_validation["card_matches_local"] is True
 
 
 class TestChunkMessage:

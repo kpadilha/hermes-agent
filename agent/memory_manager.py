@@ -52,14 +52,25 @@ _INTERNAL_NOTE_RE = re.compile(
     r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*Treat as informational background data\.\]\s*',
     re.IGNORECASE,
 )
+_RECENT_TURN_NOTE_RE = re.compile(
+    r'\n*\[Recent-turn continuity note:[\s\S]*?\]\s*',
+    re.IGNORECASE,
+)
 
 
 def sanitize_context(text: str) -> str:
-    """Strip fence tags, injected context blocks, and system notes from provider output."""
+    """Strip fence tags, injected context blocks, and leaked internal notes.
+
+    Besides fenced <memory-context> blocks, some platforms can accidentally echo
+    the agent's API-only recent-turn continuity hint back into the next user
+    message. That note is internal scaffolding, not user intent, so remove it
+    together with recalled memory payloads.
+    """
     text = _INTERNAL_CONTEXT_RE.sub('', text)
+    text = _RECENT_TURN_NOTE_RE.sub('\n', text)
     text = _INTERNAL_NOTE_RE.sub('', text)
     text = _FENCE_TAG_RE.sub('', text)
-    return text
+    return text.strip()
 
 
 class StreamingContextScrubber:

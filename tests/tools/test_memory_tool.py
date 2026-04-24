@@ -104,6 +104,17 @@ class TestMemoryStoreAdd:
         assert result["success"] is True
         assert "Python 3.12 project" in result["entries"]
 
+    def test_add_records_write_gate_decision(self, store, tmp_path):
+        from agent.memory_ledger import BeliefLedger, MemoryWriteGate
+
+        store.write_gate = MemoryWriteGate(BeliefLedger(tmp_path / "ledger.db"))
+
+        result = store.add("user", "Krishna prefers self-hosted memory systems.")
+
+        assert result["success"] is True
+        assert result["memory_write_gate"]["operation"] == "ADD"
+        assert result["memory_write_gate"]["record"]["type"] == "preference"
+
     def test_add_to_user(self, store):
         result = store.add("user", "Name: Alice")
         assert result["success"] is True
@@ -139,6 +150,21 @@ class TestMemoryStoreReplace:
         assert result["success"] is True
         assert "Python 3.12 project" in result["entries"]
         assert "Python 3.11 project" not in result["entries"]
+
+    def test_replace_records_supersede_decision(self, store, tmp_path):
+        from agent.memory_ledger import BeliefLedger, MemoryWriteGate
+
+        store.write_gate = MemoryWriteGate(BeliefLedger(tmp_path / "ledger.db"))
+        store.add("user", "Krishna prefers SaaS memory systems.")
+
+        result = store.replace(
+            "user",
+            "SaaS memory systems",
+            "Krishna prefers self-hosted memory systems.",
+        )
+
+        assert result["success"] is True
+        assert result["memory_write_gate"]["operation"] == "SUPERSEDE"
 
     def test_replace_no_match(self, store):
         store.add("memory", "fact A")

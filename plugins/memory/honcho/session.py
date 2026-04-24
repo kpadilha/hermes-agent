@@ -841,6 +841,19 @@ class HonchoSessionManager:
             except Exception as e:
                 logger.error("Failed to upload %s to Honcho: %s", filename, e)
 
+            if filename == "USER.md":
+                try:
+                    user_card = self._read_local_memory_entries(filepath)
+                    if user_card:
+                        target_peer.set_card(user_card)
+                        logger.info(
+                            "Synced USER.md into Honcho user peer card for %s (%d facts)",
+                            session_key,
+                            len(user_card),
+                        )
+                except Exception as e:
+                    logger.error("Failed to sync USER.md into Honcho peer card: %s", e)
+
         return uploaded
 
     @staticmethod
@@ -851,6 +864,15 @@ class HonchoSessionManager:
         if isinstance(card, list):
             return [str(item) for item in card if item]
         return [str(card)]
+
+    @staticmethod
+    def _read_local_memory_entries(path: Path) -> list[str]:
+        """Read a local Hermes memory markdown file into normalized entries."""
+        try:
+            from tools.memory_tool import MemoryStore
+        except Exception:
+            return []
+        return MemoryStore._read_file(path)
 
     def _fetch_peer_card(self, peer_id: str, *, target: str | None = None) -> list[str]:
         """Fetch a peer card directly from the peer object.
@@ -1068,6 +1090,60 @@ class HonchoSessionManager:
         except Exception as e:
             logger.debug("Honcho search_context failed: %s", e)
             return ""
+
+    def _get_conclusions_scope(self, session: HonchoSession, peer: str = "user"):
+        """Resolve the Honcho conclusions scope for a target peer."""
+        target_peer_id = self._resolve_peer_id(session, peer)
+        if target_peer_id == session.assistant_peer_id:
+            assistant_peer = self._get_or_create_peer(session.assistant_peer_id)
+            return assistant_peer.conclusions_of(session.assistant_peer_id)
+        if self._ai_observe_others:
+            assistant_peer = self._get_or_create_peer(session.assistant_peer_id)
+            return assistant_peer.conclusions_of(target_peer_id)
+        target_peer = self._get_or_create_peer(target_peer_id)
+        return target_peer.conclusions_of(target_peer_id)
+
+    @staticmethod
+    def _normalize_conclusion_items(items: Any) -> list[dict[str, Any]]:
+        """Normalize Honcho conclusion payloads into plain dicts."""
+        normalized: list[dict[str, Any]] = []
+        if items is None:
+            return normalized
+        if isinstance(items, dict):
+            items = items.get("items") or items.get("results") or items.get("data") or []
+        if not isinstance(items, list):
+            try:
+                items = list(items)
+            except Exception:
+                return normalized
+        for item in items:
+            if isinstance(item, dict):
+                normalized.append(dict(item))
+                continue
+            normalized.append({
+                "id": getattr(item, "id", None),
+                "content": getattr(item, "content", None),
+                "session_id": getattr(item, "session_id", None),
+            })
+        return normalized
+
+    def list_conclusions(self, session_key: str, peer: str = "user") -> list[dict[str, Any]]:
+        """Best-effort list of conclusions for audit and diagnostics."""
+        session = self._cache.get(session_key)
+        if not session:
+            return []
+        try:
+            scope = self._get_conclusions_scope(session, peer)
+            for attr in ("list", "items", "all"):
+                getter = getattr(scope, attr, None)
+                if callable(getter):
+                    return self._normalize_conclusion_items(getter())
+            if isinstance(scope, list):
+                return self._normalize_conclusion_items(scope)
+            return self._normalize_conclusion_items(scope)
+        except Exception as e:
+            logger.debug("Failed to list conclusions for %s: %s", session_key, e)
+            return []
 
     def create_conclusion(self, session_key: str, content: str, peer: str = "user") -> bool:
         """Write a conclusion about a target peer back to Honcho.

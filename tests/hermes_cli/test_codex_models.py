@@ -3,7 +3,7 @@ import os
 import sys
 from unittest.mock import patch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from hermes_cli.codex_models import DEFAULT_CODEX_MODELS, get_codex_model_ids
 
@@ -53,6 +53,8 @@ def test_get_codex_model_ids_falls_back_to_curated_defaults(tmp_path, monkeypatc
     models = get_codex_model_ids()
 
     assert models[: len(DEFAULT_CODEX_MODELS)] == DEFAULT_CODEX_MODELS
+    assert DEFAULT_CODEX_MODELS[0] == "gpt-5.5"
+    assert "gpt-5.5" in models
     assert "gpt-5.4" in models
     assert "gpt-5.3-codex-spark" not in models
 
@@ -60,12 +62,12 @@ def test_get_codex_model_ids_falls_back_to_curated_defaults(tmp_path, monkeypatc
 def test_get_codex_model_ids_adds_forward_compat_models_from_templates(monkeypatch):
     monkeypatch.setattr(
         "hermes_cli.codex_models._fetch_models_from_api",
-        lambda access_token: ["gpt-5.2-codex"],
+        lambda access_token: ["gpt-5.4"],
     )
 
     models = get_codex_model_ids(access_token="codex-access-token")
 
-    assert models == ["gpt-5.2-codex", "gpt-5.4-mini", "gpt-5.4", "gpt-5.3-codex"]
+    assert models == ["gpt-5.4", "gpt-5.5"]
 
 
 def test_model_command_uses_runtime_access_token_for_codex_list(monkeypatch):

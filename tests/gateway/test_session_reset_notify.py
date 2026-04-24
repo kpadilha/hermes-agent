@@ -122,6 +122,7 @@ class TestSessionEntryReason:
 
         # Age it past the idle threshold
         entry1.updated_at = datetime.now() - timedelta(minutes=5)
+        entry1.working_memory = {"awaiting_confirmation": True, "last_assistant_actionable": "Continuar a pesquisa."}
         store._save()
 
         # Next call should create a new session with reason
@@ -129,6 +130,8 @@ class TestSessionEntryReason:
         assert entry2.was_auto_reset is True
         assert entry2.auto_reset_reason == "idle"
         assert entry2.session_id != entry1.session_id
+        assert entry2.previous_session_id == entry1.session_id
+        assert entry2.previous_working_memory == entry1.working_memory
 
     def test_reset_had_activity_false_when_no_tokens(self, tmp_path):
         """Expired session with no tokens → reset_had_activity=False."""

@@ -6,6 +6,7 @@ def test_is_short_confirmation_message_positive_cases():
     assert AIAgent._is_short_confirmation_message("SIM dwsenhe") is True
     assert AIAgent._is_short_confirmation_message("continue") is True
     assert AIAgent._is_short_confirmation_message("pode seguir") is True
+    assert AIAgent._is_short_confirmation_message("vamos com itens 1 e 2") is True
 
 
 def test_is_short_confirmation_message_negative_cases():
@@ -82,6 +83,18 @@ def test_apply_recent_turn_binding_injects_continuity_hint_for_short_confirmatio
     assert "Kami e Hermes/Niko document pipeline" in bound
 
 
+def test_apply_recent_turn_binding_injects_continuity_hint_for_compact_item_reference_followup():
+    history = [
+        {"role": "assistant", "content": "Teste de aceitação em andamento. Se quiser, responda exatamente 'vamos com itens 1 e 2' para validar a continuidade."}
+    ]
+
+    bound = AIAgent._apply_recent_turn_binding("vamos com itens 1 e 2", history)
+
+    assert "vamos com itens 1 e 2" in bound
+    assert "immediately preceding assistant proposal" in bound
+    assert "Teste de aceitação em andamento" in bound
+
+
 def test_apply_recent_turn_binding_prefers_session_working_memory_over_history():
     history = [
         {"role": "assistant", "content": "Posso desenhar o fluxo antigo."}
@@ -96,6 +109,42 @@ def test_apply_recent_turn_binding_prefers_session_working_memory_over_history()
 
     assert "Kami e Hermes/Niko document pipeline" in bound
     assert "fluxo antigo" not in bound
+
+
+def test_bridge_previous_session_working_memory_reuses_prior_lane_for_short_confirmation():
+    previous = {
+        "last_assistant_actionable": "Continuar a pesquisa nos itens 1 e 2.",
+        "awaiting_confirmation": True,
+        "pending_proposals": [
+            {"proposal_id": "p1", "text": "Continuar a pesquisa nos itens 1 e 2."},
+        ],
+        "ambiguity_requires_clarification": False,
+    }
+
+    bridged = AIAgent._bridge_previous_session_working_memory(
+        "continue",
+        conversation_history=[],
+        working_memory={},
+        previous_working_memory=previous,
+    )
+
+    assert bridged == previous
+
+
+def test_bridge_previous_session_working_memory_does_not_reuse_prior_lane_for_unrelated_message():
+    previous = {
+        "last_assistant_actionable": "Continuar a pesquisa nos itens 1 e 2.",
+        "awaiting_confirmation": True,
+    }
+
+    bridged = AIAgent._bridge_previous_session_working_memory(
+        "mude completamente de assunto",
+        conversation_history=[],
+        working_memory={},
+        previous_working_memory=previous,
+    )
+
+    assert bridged == {}
 
 
 def test_apply_recent_turn_binding_blocks_automatic_binding_when_working_memory_is_ambiguous():
@@ -282,6 +331,34 @@ def test_run_conversation_returns_disambiguation_prompt_without_model_call():
     assert result["needs_disambiguation"] is True
     assert "Qual opção você quer" in result["final_response"]
     assert result["api_calls"] == 0
+    telemetry = result["session_working_memory"]["lcm_recent_turn"]
+    assert telemetry["workflow_counters"]["ambiguity_resolution"]["success"] == 1
+    assert telemetry["scorecard"]["workflows"]["ambiguity_resolution"]["success_rate_pct"] == 100.0
+
+
+def test_run_conversation_bridges_previous_session_lane_for_ambiguous_continue_without_model_call():
+    agent = AIAgent(
+        model="test",
+        api_key="x",
+        base_url="http://example.com/v1",
+        session_working_memory={},
+        previous_session_id="sess-prev",
+        previous_session_working_memory={
+            "pending_proposals": [
+                {"proposal_id": "p1", "text": "Continuar a pesquisa com os itens 1 e 2."},
+                {"proposal_id": "p2", "text": "Consolidar a bibliografia em um quadro comparativo."},
+            ],
+            "ambiguity_requires_clarification": True,
+            "awaiting_confirmation": True,
+        },
+        enabled_toolsets=[],
+    )
+
+    result = agent.run_conversation("continue", conversation_history=[])
+
+    assert result["needs_disambiguation"] is True
+    assert "Qual opção você quer" in result["final_response"]
+    assert result["api_calls"] == 0
 
 
 def test_merge_recent_turn_working_memory_clears_consumed_proposal_when_no_new_one_is_created():
@@ -298,7 +375,20 @@ def test_merge_recent_turn_working_memory_clears_consumed_proposal_when_no_new_o
 
     merged = AIAgent._merge_recent_turn_working_memory(prior, "sim", messages)
 
-    assert merged == {}
+    assert merged.get("awaiting_confirmation") is not True
+    assert merged["lcm_recent_turn"]["scorecard"]["continuity_health"] == "never"
+
+
+def test_build_recent_turn_working_memory_initializes_lcm_proof_surface_for_actionable_turn():
+    messages = [
+        {"role": "assistant", "content": "Posso seguir com itens 1 e 2."},
+    ]
+
+    working = AIAgent._build_recent_turn_working_memory(messages)
+
+    assert working["awaiting_confirmation"] is True
+    assert working["lcm_recent_turn"]["scorecard"]["continuity_health"] == "never"
+    assert working["lcm_recent_turn"]["proof_surface"]["has_actionable_context"] is True
 
 
 def test_merge_recent_turn_working_memory_resolves_ambiguous_selection_by_number():
@@ -318,13 +408,59 @@ def test_merge_recent_turn_working_memory_resolves_ambiguous_selection_by_number
 
     merged = AIAgent._merge_recent_turn_working_memory(prior, "2", messages)
 
-    assert merged == {}
+    assert merged.get("awaiting_confirmation") is not True
+    assert merged["lcm_recent_turn"]["scorecard"]["continuity_health"] == "never"
 
 
 def test_apply_recent_turn_binding_returns_original_without_actionable_context():
     history = [{"role": "assistant", "content": "Certo."}]
 
     assert AIAgent._apply_recent_turn_binding("sim", history) == "sim"
+
+
+def test_record_recent_turn_workflow_event_tracks_short_confirmation_binding_success():
+    working_memory = {
+        "last_assistant_actionable": "Desenhar a diferença central entre Kami e Hermes/Niko.",
+        "awaiting_confirmation": True,
+        "pending_proposals": [
+            {"proposal_id": "p1", "text": "Desenhar a diferença central entre Kami e Hermes/Niko."}
+        ],
+        "ambiguity_requires_clarification": False,
+    }
+
+    updated = AIAgent._record_recent_turn_workflow_event(
+        working_memory,
+        "short_confirmation_binding",
+        "success",
+        details={"source": "working_memory"},
+    )
+
+    telemetry = updated["lcm_recent_turn"]
+    assert telemetry["workflow_counters"]["short_confirmation_binding"]["success"] == 1
+    assert telemetry["scorecard"]["continuity_health"] == "ok"
+
+
+def test_record_recent_turn_workflow_event_tracks_missing_short_confirmation_binding_context_as_degraded():
+    working_memory = {
+        "awaiting_confirmation": True,
+        "pending_proposals": [
+            {"proposal_id": "p1", "text": "Desenhar a diferença central entre Kami e Hermes/Niko."}
+        ],
+        "ambiguity_requires_clarification": False,
+    }
+
+    updated = AIAgent._record_recent_turn_workflow_event(
+        working_memory,
+        "short_confirmation_binding",
+        "failure",
+        failure_class="missing_actionable_context",
+        details={"awaiting_confirmation": True},
+    )
+
+    telemetry = updated["lcm_recent_turn"]
+    assert telemetry["workflow_counters"]["short_confirmation_binding"]["failure"] == 1
+    assert telemetry["recent_workflow_events"][-1]["failure_class"] == "missing_actionable_context"
+    assert telemetry["scorecard"]["continuity_health"] == "degraded"
 
 
 def test_apply_recent_turn_binding_does_not_touch_non_confirmation_message():

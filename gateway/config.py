@@ -619,6 +619,28 @@ def load_gateway_config() -> GatewayConfig:
             if sr and isinstance(sr, dict):
                 gw_data["default_reset_policy"] = sr
 
+            rbt = yaml_cfg.get("reset_by_type")
+            if rbt is not None:
+                if isinstance(rbt, dict):
+                    gw_data["reset_by_type"] = rbt
+                else:
+                    logger.warning(
+                        "Ignoring invalid reset_by_type in config.yaml "
+                        "(expected mapping, got %s)",
+                        type(rbt).__name__,
+                    )
+
+            rbp = yaml_cfg.get("reset_by_platform")
+            if rbp is not None:
+                if isinstance(rbp, dict):
+                    gw_data["reset_by_platform"] = rbp
+                else:
+                    logger.warning(
+                        "Ignoring invalid reset_by_platform in config.yaml "
+                        "(expected mapping, got %s)",
+                        type(rbp).__name__,
+                    )
+
             qc = yaml_cfg.get("quick_commands")
             if qc is not None:
                 if isinstance(qc, dict):

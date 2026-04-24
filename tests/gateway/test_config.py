@@ -226,6 +226,78 @@ class TestLoadGatewayConfig:
 
         assert config.group_sessions_per_user is False
 
+    def test_bridges_reset_by_platform_from_config_yaml(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "session_reset:\n"
+            "  mode: both\n"
+            "  idle_minutes: 1440\n"
+            "  at_hour: 4\n"
+            "reset_by_platform:\n"
+            "  telegram:\n"
+            "    mode: idle\n"
+            "    idle_minutes: 4320\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        assert config.default_reset_policy.mode == "both"
+        assert config.default_reset_policy.at_hour == 4
+        assert config.reset_by_platform[Platform.TELEGRAM].mode == "idle"
+        assert config.reset_by_platform[Platform.TELEGRAM].idle_minutes == 4320
+
+    def test_reset_by_platform_override_beats_default_policy_for_telegram_dm(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "session_reset:\n"
+            "  mode: daily\n"
+            "  at_hour: 4\n"
+            "reset_by_platform:\n"
+            "  telegram:\n"
+            "    mode: idle\n"
+            "    idle_minutes: 4320\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+        policy = config.get_reset_policy(platform=Platform.TELEGRAM, session_type="dm")
+
+        assert policy.mode == "idle"
+        assert policy.idle_minutes == 4320
+        assert policy.at_hour == 4
+
+    def test_bridges_reset_by_type_from_config_yaml(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "session_reset:\n"
+            "  mode: both\n"
+            "  idle_minutes: 1440\n"
+            "  at_hour: 4\n"
+            "reset_by_type:\n"
+            "  dm:\n"
+            "    mode: idle\n"
+            "    idle_minutes: 4320\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        assert config.reset_by_type["dm"].mode == "idle"
+        assert config.reset_by_type["dm"].idle_minutes == 4320
+
     def test_bridges_thread_sessions_per_user_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
