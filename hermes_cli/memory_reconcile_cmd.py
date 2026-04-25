@@ -191,10 +191,23 @@ def _discover_honcho_conclusions(
     http_json=_honcho_http_json,
 ) -> list[str]:
     observed_id = observed_id or os.environ.get("HONCHO_USER_PEER_ID") or "96809052"
-    endpoint = f"{base_url.rstrip('/')}/workspaces/{workspace_id}/conclusions/list?size=100"
     payload = {"filters": {"observer_id": observer_id, "observed_id": observed_id}}
+    contents: list[str] = []
+    page = 1
+    size = 100
     try:
-        return _conclusion_contents(_normalize_honcho_conclusion_payload(http_json("POST", endpoint, payload, timeout=15)))
+        while True:
+            endpoint = f"{base_url.rstrip('/')}/workspaces/{workspace_id}/conclusions/list?size={size}&page={page}"
+            response = http_json("POST", endpoint, payload, timeout=15)
+            batch = _normalize_honcho_conclusion_payload(response)
+            contents.extend(_conclusion_contents(batch))
+            if not isinstance(response, dict):
+                break
+            pages = int(response.get("pages") or 1)
+            if page >= pages or not batch:
+                break
+            page += 1
+        return contents
     except Exception:
         return []
 
@@ -222,7 +235,6 @@ def sync_honcho_conclusions_from_user_md(
     )
     missing = _contains_entry(entries, existing)
     endpoint = f"{base_url.rstrip('/')}/workspaces/{workspace_id}/conclusions"
-    list_endpoint = f"{base_url.rstrip('/')}/workspaces/{workspace_id}/conclusions/list?size=100"
     if dry_run:
         return {
             "success": True,
@@ -255,9 +267,13 @@ def sync_honcho_conclusions_from_user_md(
     }
     created_payload = http_json("POST", endpoint, create_payload, timeout=30)
     created = _normalize_honcho_conclusion_payload(created_payload)
-    list_payload = {"filters": {"observer_id": observer_id, "observed_id": observed_id}}
-    visible_payload = http_json("POST", list_endpoint, list_payload, timeout=30)
-    visible = _conclusion_contents(_normalize_honcho_conclusion_payload(visible_payload))
+    visible = _discover_honcho_conclusions(
+        observer_id=observer_id,
+        observed_id=observed_id,
+        workspace_id=workspace_id,
+        base_url=base_url,
+        http_json=http_json,
+    )
     still_missing = _contains_entry(missing, visible)
     all_visible = not still_missing
     return {

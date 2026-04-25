@@ -280,6 +280,42 @@ def test_sync_honcho_conclusions_from_user_md_applies_and_validates_visibility(t
     assert result["validation"]["missing_after_write"] == []
 
 
+def test_discover_honcho_conclusions_follows_all_pages():
+    from hermes_cli.memory_reconcile_cmd import _discover_honcho_conclusions
+
+    calls = []
+
+    def fake_http(method, url, payload=None, timeout=10):
+        calls.append(url)
+        assert method == "POST"
+        assert payload == {"filters": {"observer_id": "niko", "observed_id": "96809052"}}
+        if "page=1" in url:
+            return {
+                "items": [{"content": f"fact-{i}"} for i in range(100)],
+                "page": 1,
+                "size": 100,
+                "pages": 2,
+                "total": 101,
+            }
+        if "page=2" in url:
+            return {
+                "items": [{"content": "fact-100"}],
+                "page": 2,
+                "size": 100,
+                "pages": 2,
+                "total": 101,
+            }
+        raise AssertionError(url)
+
+    conclusions = _discover_honcho_conclusions(http_json=fake_http)
+
+    assert len(conclusions) == 101
+    assert conclusions[0] == "fact-0"
+    assert conclusions[-1] == "fact-100"
+    assert len(calls) == 2
+    assert all("size=100" in call for call in calls)
+
+
 def test_memory_reconcile_apply_conclusions_outputs_visibility_validation(tmp_path, capsys):
     memories = tmp_path / "memories"
     memories.mkdir()
