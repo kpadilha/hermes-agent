@@ -3662,8 +3662,8 @@ class AIAgent:
                 or getattr(self, "_memory_write_context", "foreground")
             ),
             "session_id": self.session_id or "",
-            "parent_session_id": self._parent_session_id or "",
-            "platform": self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+            "parent_session_id": getattr(self, "_parent_session_id", None) or "",
+            "platform": getattr(self, "platform", None) or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
             "tool_name": "memory",
         }
         if task_id:
