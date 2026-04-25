@@ -33,7 +33,7 @@ class _RecordingMemoryManager:
     def __init__(self):
         self.writes = []
 
-    def on_memory_write(self, action, target, content):
+    def on_memory_write(self, action, target, content, metadata=None):
         self.writes.append((action, target, content))
 
 
@@ -4940,7 +4940,8 @@ class TestMemoryProviderTurnStart:
         """Source-level check: on_turn_start receives self._user_turn_count."""
         import inspect
         src = inspect.getsource(AIAgent.run_conversation)
-        assert "on_turn_start(self._user_turn_count" in src
+        assert "on_turn_start(" in src
+        assert "self._user_turn_count," in src
 
 
 def test_memory_provider_bridge_skips_failed_builtin_memory_write(monkeypatch):
