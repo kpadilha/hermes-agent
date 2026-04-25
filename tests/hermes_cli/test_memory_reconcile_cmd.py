@@ -398,3 +398,75 @@ def test_memory_reconcile_reports_honcho_duplicate_conclusion_guardrail(tmp_path
     assert honcho["duplicate_extra_count"] == 1
     assert payload["divergence"]["honcho_duplicate_conclusions"]["duplicate_extra_count"] == 1
     assert any(r["code"] == "honcho_duplicate_conclusions" for r in payload["recommendations"])
+
+
+def test_memory_reconcile_lcm_memory_uses_fail_severity_not_warn_info(tmp_path):
+    from hermes_cli.memory_reconcile_cmd import build_lcm_memory_state
+
+    report = {
+        "divergence": {
+            "user_missing_in_honcho_card": [],
+            "user_missing_in_honcho_conclusions": ["informational semantic lag"],
+            "ledger_missing_in_graphiti": ["warning projection lag"],
+        },
+        "recommendations": [
+            {"code": "honcho_conclusions_missing_user_entries", "severity": "info"},
+            {"code": "graphiti_projection_stale", "severity": "warn"},
+        ],
+    }
+
+    lcm_memory = build_lcm_memory_state(report)
+
+    assert lcm_memory["recent_workflow_events"][-1]["outcome"] == "success"
+    assert lcm_memory["scorecard"]["memory_sync_health"] == "ok"
+    assert lcm_memory["recent_workflow_events"][-1]["details"]["fail_recommendation_codes"] == []
+
+
+def test_memory_reconcile_lcm_memory_fails_on_fail_recommendations(tmp_path):
+    from hermes_cli.memory_reconcile_cmd import build_lcm_memory_state
+
+    report = {
+        "divergence": {
+            "user_missing_in_honcho_card": [],
+            "user_missing_in_honcho_conclusions": [],
+            "ledger_missing_in_graphiti": [],
+        },
+        "recommendations": [
+            {"code": "graphiti_discovery_failed", "severity": "fail"},
+        ],
+    }
+
+    lcm_memory = build_lcm_memory_state(report)
+
+    assert lcm_memory["recent_workflow_events"][-1]["outcome"] == "failure"
+    assert lcm_memory["scorecard"]["memory_sync_health"] == "degraded"
+    assert lcm_memory["recent_workflow_events"][-1]["details"]["fail_recommendation_codes"] == ["graphiti_discovery_failed"]
+
+
+def test_memory_reconcile_surfaces_discovery_failures_as_fail_recommendations(tmp_path, monkeypatch):
+    from hermes_cli import memory_reconcile_cmd as reconcile
+
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    (memories / "USER.md").write_text("Name: Krishna", encoding="utf-8")
+    ledger = BeliefLedger(tmp_path / "ledger.db")
+
+    monkeypatch.setattr(reconcile, "_discover_graph_facts", lambda: (_ for _ in ()).throw(RuntimeError("neo4j down")))
+    monkeypatch.setattr(reconcile, "_discover_honcho_peer_card", lambda: ["Name: Krishna"])
+    monkeypatch.setattr(reconcile, "_discover_honcho_conclusions", lambda: ["Name: Krishna"])
+    monkeypatch.setattr(reconcile, "_discover_ollama_models", lambda: [])
+
+    report = reconcile.build_memory_reconcile_report(
+        memory_dir=memories,
+        ledger=ledger,
+        graph_facts=None,
+        honcho_card=None,
+        honcho_conclusions=None,
+        ollama_models=None,
+        snapshot_wrappers=[tmp_path / "memory-ledger-mv2.md"],
+        honcho_env={"HONCHO_UNLOAD_EMBEDDING_MODEL_AFTER_REQUEST": "true"},
+    )
+
+    assert report["success"] is False
+    assert report["discovery_errors"] == [{"source": "graphiti", "error": "neo4j down", "type": "RuntimeError"}]
+    assert any(r["code"] == "graphiti_discovery_failed" and r["severity"] == "fail" for r in report["recommendations"])

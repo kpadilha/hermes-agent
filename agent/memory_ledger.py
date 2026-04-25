@@ -146,22 +146,35 @@ class BeliefLedger:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def _require_row_updated(self, cursor: sqlite3.Cursor, *, operation: str, record_id: int) -> None:
+        """Fail loudly when a ledger mutation affects no rows.
+
+        SQLite treats UPDATE/DELETE with no matching row as success. For the
+        memory ledger this is dangerous: callers can believe a record was
+        updated/deleted while nothing changed. Mutating APIs must therefore
+        verify rowcount and surface stale IDs/status mismatches as explicit
+        failures.
+        """
+        if cursor.rowcount != 1:
+            raise ValueError(f"ledger {operation} affected {cursor.rowcount} rows for record_id={record_id}")
+
     def mark_superseded(self, record_id: int, *, by_content: str = "") -> None:
         now = time.time()
         with self._connect() as conn:
-            conn.execute(
+            cur = conn.execute(
                 """
                 UPDATE memory_records
                 SET status = 'superseded', valid_until = ?, contradicted_by = ?
-                WHERE id = ?
+                WHERE id = ? AND status = 'active'
                 """,
                 (now, by_content, record_id),
             )
+            self._require_row_updated(cur, operation="mark_superseded", record_id=record_id)
 
     def update_record(self, record_id: int, *, content: str, source: str, evidence_ref: str) -> Dict[str, Any]:
         now = time.time()
         with self._connect() as conn:
-            conn.execute(
+            cur = conn.execute(
                 """
                 UPDATE memory_records
                 SET object = ?, source = ?, evidence_ref = ?, last_seen_at = ?
@@ -169,27 +182,30 @@ class BeliefLedger:
                 """,
                 (content.strip(), source, evidence_ref, now, record_id),
             )
+            self._require_row_updated(cur, operation="update_record", record_id=record_id)
         return self.get_record(record_id)
 
     def mark_deleted(self, record_id: int, *, evidence_ref: str = "") -> Dict[str, Any]:
         now = time.time()
         with self._connect() as conn:
-            conn.execute(
+            cur = conn.execute(
                 """
                 UPDATE memory_records
                 SET status = 'deleted', valid_until = ?, contradicted_by = ?
-                WHERE id = ?
+                WHERE id = ? AND status = 'active'
                 """,
                 (now, evidence_ref, record_id),
             )
+            self._require_row_updated(cur, operation="mark_deleted", record_id=record_id)
         return self.get_record(record_id)
 
     def touch_record(self, record_id: int) -> Dict[str, Any]:
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE memory_records SET last_seen_at = ? WHERE id = ?",
+            cur = conn.execute(
+                "UPDATE memory_records SET last_seen_at = ? WHERE id = ? AND status = 'active'",
                 (time.time(), record_id),
             )
+            self._require_row_updated(cur, operation="touch_record", record_id=record_id)
         return self.get_record(record_id)
 
     def record_decision(self, decision: Dict[str, Any]) -> None:

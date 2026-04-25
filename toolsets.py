@@ -23,7 +23,10 @@ Usage:
     all_tools = resolve_toolset("full_stack")
 """
 
+import logging
 from typing import List, Dict, Any, Set, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # Shared tool list for CLI and all messaging platform toolsets.
@@ -632,7 +635,8 @@ def _get_plugin_toolset_names() -> Set[str]:
             for toolset_name in registry.get_registered_toolset_names()
             if toolset_name not in TOOLSETS
         }
-    except Exception:
+    except Exception as e:
+        logger.warning("Could not read plugin-registered toolset names: %s", e)
         return set()
 
 
@@ -641,7 +645,8 @@ def _get_registry_toolset_aliases() -> Dict[str, str]:
     try:
         from tools.registry import registry
         return registry.get_registered_toolset_aliases()
-    except Exception:
+    except Exception as e:
+        logger.warning("Could not read registry toolset aliases: %s", e)
         return {}
 
 

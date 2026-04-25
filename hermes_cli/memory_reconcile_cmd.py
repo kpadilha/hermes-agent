@@ -73,8 +73,11 @@ def _discover_ollama_models() -> list[dict[str, Any]]:
             capture_output=True,
             timeout=10,
         )
-    except Exception:
-        return []
+    except Exception as exc:
+        raise RuntimeError(f"ollama model discovery failed: {exc}") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(f"ollama ps failed with exit {proc.returncode}: {detail}")
     lines = [line for line in proc.stdout.splitlines() if line.strip()]
     models = []
     for line in lines[1:]:
@@ -119,10 +122,11 @@ print(json.dumps(rows, ensure_ascii=False))
             timeout=20,
         )
         if proc.returncode != 0:
-            return []
+            detail = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(f"graphiti fact discovery failed with exit {proc.returncode}: {detail}")
         return json.loads(proc.stdout or "[]")
-    except Exception:
-        return []
+    except Exception as exc:
+        raise RuntimeError(f"graphiti fact discovery failed: {exc}") from exc
 
 
 def _honcho_http_json(method: str, url: str, payload: dict[str, Any] | None = None, timeout: int = 10) -> dict[str, Any]:
@@ -159,8 +163,8 @@ def _discover_honcho_peer_card(
     endpoint = f"{base_url.rstrip('/')}/workspaces/{workspace_id}/peers/{peer_id}/card"
     try:
         return _normalize_honcho_card_payload(http_json("GET", endpoint, None, timeout=10))
-    except Exception:
-        return []
+    except Exception as exc:
+        raise RuntimeError(f"honcho peer-card discovery failed: {exc}") from exc
 
 
 def _normalize_honcho_conclusion_payload(payload: Any) -> list[dict[str, Any]]:
@@ -209,8 +213,8 @@ def _discover_honcho_conclusions(
                 break
             page += 1
         return contents
-    except Exception:
-        return []
+    except Exception as exc:
+        raise RuntimeError(f"honcho conclusion discovery failed: {exc}") from exc
 
 
 def sync_honcho_conclusions_from_user_md(
@@ -343,6 +347,13 @@ def sync_honcho_peer_card_from_user_md(
     }
 
 
+def _safe_discover(label: str, discoverer, default_factory=list) -> tuple[Any, dict[str, Any] | None]:
+    try:
+        return discoverer(), None
+    except Exception as exc:
+        return default_factory(), {"source": label, "error": str(exc), "type": type(exc).__name__}
+
+
 def build_memory_reconcile_report(
     *,
     memory_dir: Optional[Path] = None,
@@ -356,10 +367,23 @@ def build_memory_reconcile_report(
 ) -> Dict[str, Any]:
     memory_dir = memory_dir or get_memory_dir()
     ledger = ledger or BeliefLedger()
-    graph_facts = _discover_graph_facts() if graph_facts is None else graph_facts
-    honcho_card = _discover_honcho_peer_card() if honcho_card is None else honcho_card
-    honcho_conclusions = _discover_honcho_conclusions() if honcho_conclusions is None else honcho_conclusions
-    ollama_models = _discover_ollama_models() if ollama_models is None else ollama_models
+    discovery_errors: list[dict[str, Any]] = []
+    if graph_facts is None:
+        graph_facts, error = _safe_discover("graphiti", _discover_graph_facts)
+        if error:
+            discovery_errors.append(error)
+    if honcho_card is None:
+        honcho_card, error = _safe_discover("honcho_peer_card", _discover_honcho_peer_card)
+        if error:
+            discovery_errors.append(error)
+    if honcho_conclusions is None:
+        honcho_conclusions, error = _safe_discover("honcho_conclusions", _discover_honcho_conclusions)
+        if error:
+            discovery_errors.append(error)
+    if ollama_models is None:
+        ollama_models, error = _safe_discover("ollama_models", _discover_ollama_models)
+        if error:
+            discovery_errors.append(error)
     snapshot_wrappers = _discover_snapshot_wrappers() if snapshot_wrappers is None else snapshot_wrappers
     honcho_env = _discover_honcho_env() if honcho_env is None else honcho_env
 
@@ -398,6 +422,13 @@ def build_memory_reconcile_report(
         },
     }
     recommendations = []
+    for error in discovery_errors:
+        recommendations.append({
+            "code": f"{error['source']}_discovery_failed",
+            "severity": "fail",
+            "error": error.get("error", ""),
+            "type": error.get("type", ""),
+        })
     if divergence["user_missing_in_honcho_card"]:
         recommendations.append({"code": "honcho_card_missing_user_entries", "severity": "warn"})
     if divergence["user_missing_in_honcho_conclusions"]:
@@ -433,7 +464,7 @@ def build_memory_reconcile_report(
         recommendations.append({"code": "ollama_qwen35_graphiti_model_not_resident", "severity": "info"})
 
     return {
-        "success": True,
+        "success": not any(r.get("severity") == "fail" for r in recommendations),
         "sources": {
             "user_md": {"path": str(memory_dir / "USER.md"), "count": len(user_entries)},
             "memory_md": {"path": str(memory_dir / "MEMORY.md"), "count": len(memory_entries)},
@@ -451,6 +482,7 @@ def build_memory_reconcile_report(
         "freshness": {
             "memvid_latest_wrapper_age_seconds": _path_age_seconds(latest_wrapper) if latest_wrapper else None,
         },
+        "discovery_errors": discovery_errors,
         "runtime": {
             "ollama": {
                 "models": sorted(model_names),
@@ -479,7 +511,13 @@ def build_lcm_memory_state(report: Dict[str, Any]) -> Dict[str, Any]:
     missing_card = divergence.get("user_missing_in_honcho_card") or []
     missing_conclusions = divergence.get("user_missing_in_honcho_conclusions") or []
     missing_graph = divergence.get("ledger_missing_in_graphiti") or []
-    success = not fail_recs and not missing_card and not missing_conclusions and not missing_graph
+    # Keep the LCM proof severity aligned with the reconcile report severity.
+    # Missing Honcho conclusions and stale Graphiti projections are intentionally
+    # warn/info recommendations in the report: they should remain visible in the
+    # proof details, but must not turn the architecture dashboard red unless a
+    # fail-severity invariant is violated. Otherwise a non-blocking reconcile
+    # recommendation can poison gateway health until a manual proof refresh.
+    success = not fail_recs and not missing_card
     event = {
         "workflow": "memory_reconcile_projection",
         "outcome": "success" if success else "failure",
@@ -489,6 +527,7 @@ def build_lcm_memory_state(report: Dict[str, Any]) -> Dict[str, Any]:
             "missing_as_conclusions": missing_conclusions,
             "ledger_missing_in_graphiti": missing_graph,
             "recommendation_codes": [str(r.get("code")) for r in recommendations if isinstance(r, dict)],
+            "fail_recommendation_codes": [str(r.get("code")) for r in fail_recs if isinstance(r, dict)],
         },
     }
     counters = {"memory_reconcile_projection": {"success": 1 if success else 0, "failure": 0 if success else 1}}

@@ -388,12 +388,13 @@ class TestTranscribeLocalCommand:
             return _TempDir()
 
         def fake_run(cmd, *args, **kwargs):
-            if isinstance(cmd, list):
+            if isinstance(cmd, list) and cmd and "ffmpeg" in cmd[0]:
                 output_path = cmd[-1]
                 with open(output_path, "wb") as handle:
                     handle.write(b"RIFF....WAVEfmt ")
                 return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
+            assert isinstance(cmd, list)
+            assert kwargs.get("shell") is False
             (out_dir / "test.txt").write_text("hello from local command\n", encoding="utf-8")
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -1342,3 +1343,23 @@ class TestTranscribeAudioXAIDispatch:
             transcribe_audio(sample_ogg, model="custom-stt")
 
         assert mock_xai.call_args[0][1] == "custom-stt"
+
+
+def test_local_command_placeholder_values_cannot_inject_shell(tmp_path):
+    from tools.transcription_tools import _format_local_stt_command_args
+
+    marker = tmp_path / "pwned"
+    args = _format_local_stt_command_args(
+        "whisper {input_path} --output_dir {output_dir} --language {language} --model {model}",
+        input_path=f"/tmp/audio.wav; touch {marker}",
+        output_dir=str(tmp_path),
+        language="en; touch /tmp/lang-pwned",
+        model="base; touch /tmp/model-pwned",
+    )
+
+    assert args[0] == "whisper"
+    assert f"/tmp/audio.wav; touch {marker}" in args
+    assert "en; touch /tmp/lang-pwned" in args
+    assert "base; touch /tmp/model-pwned" in args
+    assert ";" not in args
+    assert not marker.exists()

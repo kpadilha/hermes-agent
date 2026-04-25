@@ -469,6 +469,30 @@ def _prepare_local_audio(file_path: str, work_dir: str) -> tuple[Optional[str], 
         return None, f"Failed to convert audio for local STT: {details}"
 
 
+def _format_local_stt_command_args(
+    command_template: str,
+    *,
+    input_path: str,
+    output_dir: str,
+    language: str,
+    model: str,
+) -> list[str]:
+    """Render the local STT command template into argv for shell-free execution.
+
+    The template historically looked like a shell command, but all placeholders
+    are substituted with shell-quoted values and then parsed with shlex. Running
+    the final command with shell=False prevents metacharacters in paths, model
+    names, or language values from becoming command injection.
+    """
+    command = command_template.format(
+        input_path=shlex.quote(input_path),
+        output_dir=shlex.quote(output_dir),
+        language=shlex.quote(language),
+        model=shlex.quote(model),
+    )
+    return shlex.split(command)
+
+
 def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]:
     """Run the configured local STT command template and read back a .txt transcript."""
     command_template = _get_local_command_template()
@@ -495,13 +519,14 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
             if prep_error:
                 return {"success": False, "transcript": "", "error": prep_error}
 
-            command = command_template.format(
-                input_path=shlex.quote(prepared_input),
-                output_dir=shlex.quote(output_dir),
-                language=shlex.quote(language),
-                model=shlex.quote(normalized_model),
+            command_args = _format_local_stt_command_args(
+                command_template,
+                input_path=prepared_input,
+                output_dir=output_dir,
+                language=language,
+                model=normalized_model,
             )
-            subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
+            subprocess.run(command_args, shell=False, check=True, capture_output=True, text=True)
 
             txt_files = sorted(Path(output_dir).glob("*.txt"))
             if not txt_files:

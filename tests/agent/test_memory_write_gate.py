@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from agent.memory_ledger import BeliefLedger, MemoryWriteGate
 
 
@@ -185,3 +187,28 @@ def test_ledger_list_records_returns_all_records_without_search_cap(tmp_path):
     superseded = ledger.list_records(status="superseded")
     assert len(superseded) == 12
     assert {row["status"] for row in superseded} == {"superseded"}
+
+
+def test_ledger_mutations_fail_loudly_on_missing_or_inactive_records(tmp_path):
+    ledger = BeliefLedger(tmp_path / "memory-ledger.db")
+    record = ledger.add_record({
+        "type": "fact",
+        "subject": "system",
+        "predicate": "states",
+        "object": "record exists",
+        "source": "test",
+        "evidence_ref": "test#add",
+        "storage_targets": "memory",
+    })
+
+    with pytest.raises(ValueError, match="update_record affected 0 rows"):
+        ledger.update_record(9999, content="missing", source="test", evidence_ref="test#missing")
+
+    ledger.mark_deleted(record["id"], evidence_ref="test#delete")
+
+    with pytest.raises(ValueError, match="update_record affected 0 rows"):
+        ledger.update_record(record["id"], content="stale", source="test", evidence_ref="test#stale")
+    with pytest.raises(ValueError, match="mark_deleted affected 0 rows"):
+        ledger.mark_deleted(record["id"], evidence_ref="test#delete-again")
+    with pytest.raises(ValueError, match="touch_record affected 0 rows"):
+        ledger.touch_record(record["id"])

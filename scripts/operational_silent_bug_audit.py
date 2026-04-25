@@ -58,6 +58,18 @@ def audit_repo(repo: Path) -> list[Finding]:
             snippet=snippet,
         ))
 
+    silent_discovery_pattern = re.compile(r"except[^\n]*Exception[^\n]*:\n[ \t]+return[ \t]+(?:\[\]|\{\})")
+    if silent_discovery_pattern.search(reconcile_text):
+        line, snippet = _line_of(reconcile_text, 'except Exception:')
+        findings.append(Finding(
+            code="memory_reconcile_silent_discovery_failure",
+            severity="fail",
+            path=rel,
+            line=line,
+            detail="Memory reconcile discovery failures must surface as structured discovery_errors/recommendations, not empty data.",
+            snippet=snippet,
+        ))
+
     run_agent = repo / "run_agent.py"
     run_text = _read(run_agent)
     rel = str(run_agent.relative_to(repo))
@@ -74,6 +86,19 @@ def audit_repo(repo: Path) -> list[Finding]:
                 detail="External memory providers must be notified only after the built-in memory write succeeds.",
                 snippet=snippet,
             ))
+
+    ledger = repo / "agent" / "memory_ledger.py"
+    ledger_text = _read(ledger)
+    if "def _require_row_updated" not in ledger_text or "cursor.rowcount" not in ledger_text:
+        line, snippet = _line_of(ledger_text, "def update_record")
+        findings.append(Finding(
+            code="ledger_mutations_not_rowcount_checked",
+            severity="fail",
+            path=str(ledger.relative_to(repo)),
+            line=line,
+            detail="Ledger UPDATE paths must verify rowcount; SQLite no-op updates otherwise look successful.",
+            snippet=snippet,
+        ))
 
     finite_all_record_pattern = re.compile(r"ledger\.search\(\s*['\"]['\"]\s*,\s*limit\s*=")
     for candidate in [

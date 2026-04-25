@@ -231,3 +231,33 @@ class TestPluginToolsets:
         all_toolsets = get_all_toolsets()
         assert "plugin_bundle" in all_toolsets
         assert all_toolsets["plugin_bundle"]["tools"] == ["plugin_tool"]
+
+    def test_plugin_toolset_discovery_failure_is_logged(self, monkeypatch, caplog):
+        import toolsets
+
+        class BrokenRegistry:
+            def get_registered_toolset_names(self):
+                raise RuntimeError("registry unavailable")
+
+        monkeypatch.setattr("tools.registry.registry", BrokenRegistry())
+
+        with caplog.at_level("WARNING", logger="toolsets"):
+            assert toolsets._get_plugin_toolset_names() == set()
+
+        assert "Could not read plugin-registered toolset names" in caplog.text
+        assert "registry unavailable" in caplog.text
+
+    def test_registry_alias_discovery_failure_is_logged(self, monkeypatch, caplog):
+        import toolsets
+
+        class BrokenRegistry:
+            def get_registered_toolset_aliases(self):
+                raise RuntimeError("alias registry unavailable")
+
+        monkeypatch.setattr("tools.registry.registry", BrokenRegistry())
+
+        with caplog.at_level("WARNING", logger="toolsets"):
+            assert toolsets._get_registry_toolset_aliases() == {}
+
+        assert "Could not read registry toolset aliases" in caplog.text
+        assert "alias registry unavailable" in caplog.text
