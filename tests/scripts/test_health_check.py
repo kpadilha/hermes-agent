@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -260,3 +261,51 @@ def test_check_docker_fails_when_health_inspect_fails(monkeypatch):
     assert cr.failures
     assert all(item["status"] == "FAIL" for item in cr.results if item["name"].startswith("docker_"))
     assert "health template failed" in cr.failures[0]
+
+
+
+def test_codex_expiry_warns_inside_seven_days(monkeypatch):
+    import base64, json, time
+    module = _load_module()
+    cr = module.CheckResult()
+    exp = int(time.time() + 6 * 86400)
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+    token = f"x.{payload}.y"
+
+    module.check_codex_token_expiry(cr, {"logged_in": True, "api_key": token})
+
+    assert any(item["name"] == "primary_auth_expiry" and item["status"] == "WARN" for item in cr.results)
+
+
+def test_analyze_cron_jobs_detects_delivery_errors_and_stale_jobs():
+    from datetime import datetime, timedelta, timezone
+    module = _load_module()
+    now = datetime(2026, 4, 26, tzinfo=timezone.utc)
+    jobs = [
+        {"name": "bad delivery", "enabled": True, "schedule": "every 30m", "last_run_at": now.isoformat(), "last_delivery_error": "telegram failed"},
+        {"name": "stale", "enabled": True, "schedule": "every 30m", "last_run_at": (now - timedelta(hours=3)).isoformat()},
+        {"name": "fresh", "enabled": True, "schedule": "0 */6 * * *", "last_run_at": (now - timedelta(hours=1)).isoformat()},
+    ]
+
+    score = module.analyze_cron_jobs(jobs, now=now)
+
+    assert score["delivery_error_count"] == 1
+    assert score["stale_count"] == 1
+    assert score["stale_jobs"] == ["stale"]
+
+
+def test_check_backup_freshness_ok_with_recent_state(monkeypatch, tmp_path):
+    from datetime import datetime, timezone
+    module = _load_module()
+    monkeypatch.setattr(module, "HERMES_HOME", tmp_path)
+    now = datetime.now(timezone.utc).isoformat()
+    (tmp_path / "backup-state.json").write_text(json.dumps({"jobs": {
+        "operational": {"last_success_at": now},
+        "knowledge": {"last_success_at": now},
+        "secrets-bootstrap": {"last_success_at": now},
+    }}), encoding="utf-8")
+    cr = module.CheckResult()
+
+    module.check_backup_freshness(cr)
+
+    assert any(item["name"] == "backup_freshness" and item["status"] == "OK" for item in cr.results)

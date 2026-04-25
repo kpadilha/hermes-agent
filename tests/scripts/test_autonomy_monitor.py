@@ -110,3 +110,47 @@ def test_state_round_trip_and_cli_json(monkeypatch, tmp_path, capsys):
     assert state_path.exists()
     saved = json.loads(state_path.read_text(encoding="utf-8"))
     assert saved["overall"] == "ok"
+
+
+
+def test_send_telegram_alert_captures_healthcheck_output(monkeypatch):
+    module = _load_module()
+    calls = []
+
+    class Result:
+        returncode = 2
+        stdout = "noisy health output"
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return Result()
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    module.send_telegram_alert({"status": {"overall": "warn"}})
+
+    assert calls
+    args, kwargs = calls[0]
+    assert "--alert" in args
+    assert "--json" in args
+    assert kwargs.get("capture_output") is True
+    assert kwargs.get("text") is True
+
+
+
+def test_run_json_parses_warning_exit_json(monkeypatch):
+    module = _load_module()
+
+    class Result:
+        returncode = 2
+        stdout = '{"healthy": false, "has_warnings": true}\n'
+        stderr = ""
+
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: Result())
+
+    payload = module.run_json(["health_check.py", "--json"])
+
+    assert payload["healthy"] is False
+    assert payload["_nonzero_returncode"] == 2
+    assert "_error" not in payload
