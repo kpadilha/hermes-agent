@@ -108,8 +108,9 @@ with GraphDatabase.driver(env["NEO4J_URI"], auth=(env["NEO4J_USER"], env["NEO4J_
         MATCH (s)-[r]->(o)
         WHERE type(r) IN ['HERMES_MEMORY_FACT', 'OLLAMA_EXTRACTED_FACT']
         RETURN coalesce(s.name, '') AS subject, coalesce(r.predicate, type(r)) AS predicate,
-               coalesce(o.name, '') AS object, type(r) AS type, coalesce(r.status, '') AS status
-        LIMIT 100
+               coalesce(o.name, '') AS object, coalesce(o.full_text, '') AS full_object,
+               type(r) AS type, coalesce(r.status, '') AS status
+        LIMIT 500
         """).data()
 print(json.dumps(rows, ensure_ascii=False))
 '''

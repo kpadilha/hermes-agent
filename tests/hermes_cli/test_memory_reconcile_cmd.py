@@ -602,3 +602,28 @@ def test_memory_reconcile_apply_duplicate_delete_outputs_validation(tmp_path, ca
     payload = json.loads(capsys.readouterr().out)
     assert payload["apply_result"]["success"] is True
     assert payload["apply_result"]["would_delete_count"] == 1
+
+
+
+def test_discover_graph_facts_returns_full_object_text_for_long_projection(monkeypatch):
+    from hermes_cli import memory_reconcile_cmd as reconcile
+
+    monkeypatch.setattr(reconcile.Path, "exists", lambda self: True)
+    captured = {}
+
+    class Proc:
+        returncode = 0
+        stdout = '[{"subject":"system","predicate":"states","object":"truncated","full_object":"full long object"}]'
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured["code"] = cmd[2]
+        return Proc()
+
+    monkeypatch.setattr(reconcile.subprocess, "run", fake_run)
+
+    facts = reconcile._discover_graph_facts()
+
+    assert facts[0]["full_object"] == "full long object"
+    assert "o.full_text" in captured["code"]
+    assert "AS full_object" in captured["code"]
