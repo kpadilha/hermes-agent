@@ -187,6 +187,75 @@ def _conclusion_contents(items: Iterable[dict[str, Any]]) -> list[str]:
     return [str(item.get("content") or "") for item in items if str(item.get("content") or "").strip()]
 
 
+def _normalize_conclusion_items(items: Iterable[Any]) -> list[dict[str, Any]]:
+    """Normalize mixed conclusion inputs while preserving IDs when present."""
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            content = str(item.get("content") or "").strip()
+            if content:
+                normalized.append(dict(item, content=content))
+        else:
+            content = str(item or "").strip()
+            if content:
+                normalized.append({"content": content})
+    return normalized
+
+
+def _conclusion_texts(items: Iterable[Any]) -> list[str]:
+    return [item["content"] for item in _normalize_conclusion_items(items)]
+
+
+def build_honcho_hygiene_report(
+    *,
+    user_entries: list[str],
+    honcho_conclusions: Iterable[Any],
+) -> dict[str, Any]:
+    """Build a read-only hygiene report for visible Honcho conclusions."""
+    items = _normalize_conclusion_items(honcho_conclusions)
+    by_content: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        by_content.setdefault(item["content"], []).append(item)
+
+    duplicate_groups = []
+    for content, group in by_content.items():
+        if len(group) <= 1:
+            continue
+        keep = group[0]
+        delete_candidates = group[1:]
+        duplicate_groups.append({
+            "content": content,
+            "count": len(group),
+            "keep_id": keep.get("id") or keep.get("conclusion_id"),
+            "delete_candidate_ids": [
+                item.get("id") or item.get("conclusion_id") for item in delete_candidates
+                if item.get("id") or item.get("conclusion_id")
+            ],
+            "delete_candidate_count": len(delete_candidates),
+        })
+
+    conclusion_texts = [item["content"] for item in items]
+    missing_user_entries = _contains_entry(user_entries, conclusion_texts)
+    matched_user_entries = [entry for entry in user_entries if entry not in missing_user_entries]
+    not_in_user_md = _contains_entry(conclusion_texts, user_entries)
+    timestamps = [
+        str(item.get("created_at") or item.get("created") or item.get("updated_at") or "")
+        for item in items
+        if item.get("created_at") or item.get("created") or item.get("updated_at")
+    ]
+    return {
+        "total_conclusions": len(items),
+        "unique_conclusions": len(by_content),
+        "exact_duplicate_extra_count": sum(max(0, len(group) - 1) for group in by_content.values()),
+        "exact_duplicate_groups": duplicate_groups[:50],
+        "user_entry_matches": matched_user_entries,
+        "user_entries_missing_as_conclusions": missing_user_entries,
+        "conclusions_not_in_user_md": not_in_user_md[:100],
+        "oldest_timestamp": min(timestamps) if timestamps else None,
+        "newest_timestamp": max(timestamps) if timestamps else None,
+    }
+
+
 def _discover_honcho_conclusions(
     *,
     observer_id: str = "niko",
@@ -215,6 +284,103 @@ def _discover_honcho_conclusions(
         return contents
     except Exception as exc:
         raise RuntimeError(f"honcho conclusion discovery failed: {exc}") from exc
+
+
+def _discover_honcho_conclusion_items(
+    *,
+    observer_id: str = "niko",
+    observed_id: str | None = None,
+    workspace_id: str = "niko-main",
+    base_url: str = "http://localhost:8000/v3",
+    http_json=_honcho_http_json,
+) -> list[dict[str, Any]]:
+    observed_id = observed_id or os.environ.get("HONCHO_USER_PEER_ID") or "96809052"
+    payload = {"filters": {"observer_id": observer_id, "observed_id": observed_id}}
+    items: list[dict[str, Any]] = []
+    page = 1
+    size = 100
+    try:
+        while True:
+            endpoint = f"{base_url.rstrip('/')}/workspaces/{workspace_id}/conclusions/list?size={size}&page={page}"
+            response = http_json("POST", endpoint, payload, timeout=15)
+            batch = _normalize_honcho_conclusion_payload(response)
+            items.extend(_normalize_conclusion_items(batch))
+            if not isinstance(response, dict):
+                break
+            pages = int(response.get("pages") or 1)
+            if page >= pages or not batch:
+                break
+            page += 1
+        return items
+    except Exception as exc:
+        raise RuntimeError(f"honcho conclusion item discovery failed: {exc}") from exc
+
+
+def delete_exact_duplicate_honcho_conclusions(
+    *,
+    honcho_conclusions: Optional[list[Any]] = None,
+    observer_id: str = "niko",
+    observed_id: str = "96809052",
+    workspace_id: str = "niko-main",
+    base_url: str = "http://localhost:8000/v3",
+    http_json=_honcho_http_json,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Delete only exact duplicate Honcho conclusions, keeping first-seen item."""
+    discovered = honcho_conclusions if honcho_conclusions is not None else _discover_honcho_conclusion_items(
+        observer_id=observer_id,
+        observed_id=observed_id,
+        workspace_id=workspace_id,
+        base_url=base_url,
+        http_json=http_json,
+    )
+    items = _normalize_conclusion_items(discovered)
+    hygiene = build_honcho_hygiene_report(user_entries=[], honcho_conclusions=items)
+    delete_ids: list[str] = []
+    for group in hygiene["exact_duplicate_groups"]:
+        delete_ids.extend(str(item) for item in group.get("delete_candidate_ids") or [] if item)
+    endpoint_base = f"{base_url.rstrip('/')}/workspaces/{workspace_id}/conclusions"
+    if dry_run:
+        return {
+            "success": True,
+            "dry_run": True,
+            "observer_id": observer_id,
+            "observed_id": observed_id,
+            "workspace_id": workspace_id,
+            "would_delete_count": len(delete_ids),
+            "delete_candidate_ids": delete_ids,
+            "duplicate_groups": hygiene["exact_duplicate_groups"],
+            "validation": {"duplicate_extra_count_after": None},
+        }
+    deleted: list[str] = []
+    for conclusion_id in delete_ids:
+        http_json("DELETE", f"{endpoint_base}/{conclusion_id}", None, timeout=15)
+        deleted.append(conclusion_id)
+    readback = _discover_honcho_conclusion_items(
+        observer_id=observer_id,
+        observed_id=observed_id,
+        workspace_id=workspace_id,
+        base_url=base_url,
+        http_json=http_json,
+    )
+    after = build_honcho_hygiene_report(user_entries=[], honcho_conclusions=readback)
+    expected_after = max(0, hygiene["exact_duplicate_extra_count"] - len(deleted))
+    success = after["exact_duplicate_extra_count"] <= expected_after
+    return {
+        "success": success,
+        "dry_run": False,
+        "observer_id": observer_id,
+        "observed_id": observed_id,
+        "workspace_id": workspace_id,
+        "deleted_count": len(deleted),
+        "deleted_ids": deleted,
+        "duplicate_groups_before": hygiene["exact_duplicate_groups"],
+        "validation": {
+            "duplicate_extra_count_before": hygiene["exact_duplicate_extra_count"],
+            "duplicate_extra_count_after": after["exact_duplicate_extra_count"],
+            "readback_count": after["total_conclusions"],
+        },
+    }
 
 
 def sync_honcho_conclusions_from_user_md(
@@ -395,18 +561,23 @@ def build_memory_reconcile_report(
     graph_texts = [json.dumps(f, ensure_ascii=False) for f in graph_facts]
     model_names = {m.get("name") for m in ollama_models}
     latest_wrapper = snapshot_wrappers[0] if snapshot_wrappers else None
-    conclusion_counts = Counter(item for item in honcho_conclusions if str(item).strip())
+    honcho_conclusion_texts = _conclusion_texts(honcho_conclusions)
+    conclusion_counts = Counter(item for item in honcho_conclusion_texts if str(item).strip())
     duplicate_conclusions = {
         item: count for item, count in conclusion_counts.items() if count > 1
     }
     duplicate_total = sum(count - 1 for count in duplicate_conclusions.values())
     peer_card_count = len(honcho_card)
-    conclusion_count = len(honcho_conclusions)
+    conclusion_count = len(honcho_conclusion_texts)
     conclusion_to_card_ratio = round(conclusion_count / peer_card_count, 2) if peer_card_count else None
+    honcho_hygiene = build_honcho_hygiene_report(
+        user_entries=user_entries,
+        honcho_conclusions=honcho_conclusions,
+    )
 
     divergence = {
         "user_missing_in_honcho_card": _contains_entry(user_entries, honcho_card),
-        "user_missing_in_honcho_conclusions": _contains_entry(user_entries, honcho_conclusions),
+        "user_missing_in_honcho_conclusions": _contains_entry(user_entries, honcho_conclusion_texts),
         "ledger_active_conflicts": active_conflicts,
         "ledger_missing_in_graphiti": _contains_entry(
             [str(r.get("object") or "") for r in ledger_records if r.get("status") == "active"],
@@ -498,6 +669,7 @@ def build_memory_reconcile_report(
                 "deriver_provider": honcho_env.get("DERIVER_PROVIDER"),
             },
         },
+        "honcho_hygiene": honcho_hygiene,
         "divergence": divergence,
         "recommendations": recommendations,
     }
@@ -581,6 +753,15 @@ def build_fix_plan(report: Dict[str, Any], *, dry_run: bool = True) -> Dict[str,
             "command": "honcho_conclude(...) for each approved missing fact  # proposed only",
             "mutates": False,
         })
+    if "honcho_duplicate_conclusions" in codes:
+        actions.append({
+            "id": "delete_exact_duplicate_honcho_conclusions",
+            "description": "Delete exact duplicate Honcho conclusions only, preserving the first visible conclusion per content string.",
+            "reason": "Exact duplicates add semantic noise and are safe to review as explicit IDs before deletion.",
+            "items": (report.get("honcho_hygiene") or {}).get("exact_duplicate_groups") or [],
+            "command": "hermes memory reconcile --apply-action delete_exact_duplicate_honcho_conclusions --dry-run --json",
+            "mutates": False,
+        })
     if "graphiti_projection_stale" in codes:
         actions.append({
             "id": "sync_memory_ledger_to_graphiti",
@@ -633,6 +814,7 @@ def memory_reconcile_command(
     honcho_env: Optional[dict[str, str]] = None,
     peer_card_syncer=sync_honcho_peer_card_from_user_md,
     conclusion_syncer=sync_honcho_conclusions_from_user_md,
+    duplicate_conclusion_deleter=delete_exact_duplicate_honcho_conclusions,
     runtime_status_writer=None,
 ) -> None:
     payload = build_memory_reconcile_report(
@@ -659,6 +841,12 @@ def memory_reconcile_command(
         elif apply_action == "add_missing_honcho_conclusions":
             payload["apply_result"] = conclusion_syncer(
                 memory_dir=memory_dir,
+                observed_id=str(getattr(args, "honcho_peer", "") or "96809052"),
+                dry_run=bool(getattr(args, "dry_run", False)),
+            )
+        elif apply_action == "delete_exact_duplicate_honcho_conclusions":
+            payload["apply_result"] = duplicate_conclusion_deleter(
+                honcho_conclusions=honcho_conclusions,
                 observed_id=str(getattr(args, "honcho_peer", "") or "96809052"),
                 dry_run=bool(getattr(args, "dry_run", False)),
             )

@@ -9,6 +9,7 @@ from hermes_cli.memory_reconcile_cmd import (
     memory_reconcile_command,
     sync_honcho_peer_card_from_user_md,
     sync_honcho_conclusions_from_user_md,
+    delete_exact_duplicate_honcho_conclusions,
 )
 
 
@@ -470,3 +471,134 @@ def test_memory_reconcile_surfaces_discovery_failures_as_fail_recommendations(tm
     assert report["success"] is False
     assert report["discovery_errors"] == [{"source": "graphiti", "error": "neo4j down", "type": "RuntimeError"}]
     assert any(r["code"] == "graphiti_discovery_failed" and r["severity"] == "fail" for r in report["recommendations"])
+
+
+
+def test_memory_reconcile_reports_read_only_honcho_hygiene(tmp_path):
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    (memories / "USER.md").write_text("Name: Krishna\n§\nTimezone: Europe/Zurich", encoding="utf-8")
+    ledger = BeliefLedger(tmp_path / "ledger.db")
+
+    report = build_memory_reconcile_report(
+        memory_dir=memories,
+        ledger=ledger,
+        graph_facts=[],
+        honcho_card=["Name: Krishna"],
+        honcho_conclusions=[
+            {"id": "c1", "content": "Name: Krishna", "created_at": "2026-01-01T00:00:00Z"},
+            {"id": "c2", "content": "Name: Krishna", "created_at": "2026-01-02T00:00:00Z"},
+            {"id": "c3", "content": "Old fact", "created_at": "2026-01-03T00:00:00Z"},
+        ],
+        ollama_models=[],
+        snapshot_wrappers=[tmp_path / "memory-ledger-mv2.md"],
+        honcho_env={"HONCHO_UNLOAD_EMBEDDING_MODEL_AFTER_REQUEST": "true"},
+    )
+
+    hygiene = report["honcho_hygiene"]
+    assert hygiene["total_conclusions"] == 3
+    assert hygiene["unique_conclusions"] == 2
+    assert hygiene["exact_duplicate_extra_count"] == 1
+    assert hygiene["exact_duplicate_groups"][0]["keep_id"] == "c1"
+    assert hygiene["exact_duplicate_groups"][0]["delete_candidate_ids"] == ["c2"]
+    assert hygiene["user_entry_matches"] == ["Name: Krishna"]
+    assert hygiene["user_entries_missing_as_conclusions"] == ["Timezone: Europe/Zurich"]
+    assert hygiene["conclusions_not_in_user_md"] == ["Old fact"]
+
+
+def test_build_fix_plan_includes_exact_honcho_duplicate_dedupe_dry_run():
+    report = {
+        "recommendations": [{"code": "honcho_duplicate_conclusions", "severity": "warn"}],
+        "divergence": {},
+        "honcho_hygiene": {
+            "exact_duplicate_groups": [
+                {"content": "Name: Krishna", "keep_id": "c1", "delete_candidate_ids": ["c2"]}
+            ]
+        },
+    }
+
+    plan = build_fix_plan(report, dry_run=True)
+
+    action = next(a for a in plan["proposed_actions"] if a["id"] == "delete_exact_duplicate_honcho_conclusions")
+    assert action["mutates"] is False
+    assert action["items"] == [{"content": "Name: Krishna", "keep_id": "c1", "delete_candidate_ids": ["c2"]}]
+
+
+def test_delete_exact_duplicate_honcho_conclusions_dry_run_does_not_delete():
+    calls = []
+
+    def fake_http(method, url, payload=None, timeout=10):
+        calls.append((method, url, payload))
+        raise AssertionError("dry run must not call HTTP")
+
+    result = delete_exact_duplicate_honcho_conclusions(
+        honcho_conclusions=[
+            {"id": "c1", "content": "Name: Krishna"},
+            {"id": "c2", "content": "Name: Krishna"},
+        ],
+        http_json=fake_http,
+        dry_run=True,
+    )
+
+    assert result["success"] is True
+    assert result["dry_run"] is True
+    assert result["would_delete_count"] == 1
+    assert result["delete_candidate_ids"] == ["c2"]
+    assert calls == []
+
+
+def test_delete_exact_duplicate_honcho_conclusions_applies_and_validates_readback():
+    remaining = [
+        {"id": "c1", "content": "Name: Krishna"},
+        {"id": "c2", "content": "Name: Krishna"},
+    ]
+    calls = []
+
+    def fake_http(method, url, payload=None, timeout=10):
+        calls.append((method, url, payload))
+        if method == "DELETE" and url.endswith("/conclusions/c2"):
+            remaining[:] = [item for item in remaining if item["id"] != "c2"]
+            return {}
+        if method == "POST" and "/conclusions/list" in url:
+            return {"items": remaining, "page": 1, "pages": 1, "size": 100, "total": len(remaining)}
+        raise AssertionError((method, url, payload))
+
+    result = delete_exact_duplicate_honcho_conclusions(
+        honcho_conclusions=list(remaining),
+        base_url="http://honcho.test/v3",
+        workspace_id="niko-main",
+        http_json=fake_http,
+        dry_run=False,
+    )
+
+    assert result["success"] is True
+    assert result["deleted_count"] == 1
+    assert result["validation"]["duplicate_extra_count_after"] == 0
+    assert any(call[0] == "DELETE" for call in calls)
+
+
+def test_memory_reconcile_apply_duplicate_delete_outputs_validation(tmp_path, capsys):
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    (memories / "USER.md").write_text("Name: Krishna", encoding="utf-8")
+    ledger = BeliefLedger(tmp_path / "ledger.db")
+
+    def fake_delete(**kwargs):
+        return {"success": True, "dry_run": True, "would_delete_count": 1, "validation": {"duplicate_extra_count_after": None}}
+
+    memory_reconcile_command(
+        SimpleNamespace(json=True, fix=False, dry_run=True, apply_action="delete_exact_duplicate_honcho_conclusions", honcho_peer="96809052"),
+        memory_dir=memories,
+        ledger=ledger,
+        graph_facts=[],
+        honcho_card=["Name: Krishna"],
+        honcho_conclusions=[{"id": "c1", "content": "Name: Krishna"}, {"id": "c2", "content": "Name: Krishna"}],
+        ollama_models=[],
+        snapshot_wrappers=[],
+        honcho_env={},
+        duplicate_conclusion_deleter=fake_delete,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["apply_result"]["success"] is True
+    assert payload["apply_result"]["would_delete_count"] == 1
