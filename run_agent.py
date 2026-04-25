@@ -9746,8 +9746,15 @@ def _extract_text_content(content: Any) -> str:
                 old_text=function_args.get("old_text"),
                 store=self._memory_store,
             )
-            # Bridge: notify external memory provider of built-in memory writes
-            if self._memory_manager and function_args.get("action") in ("add", "replace"):
+            # Bridge: notify external memory provider only after the built-in
+            # memory write succeeds. A rejected local write (for example char
+            # limit exceeded) must not leak into Honcho as a semantic conclusion.
+            if (
+                self._memory_manager
+                and function_args.get("action") in ("add", "replace")
+                and isinstance(result, dict)
+                and result.get("success") is True
+            ):
                 try:
                     self._memory_manager.on_memory_write(
                         function_args.get("action", ""),
@@ -10288,8 +10295,15 @@ def _extract_text_content(content: Any) -> str:
                     old_text=function_args.get("old_text"),
                     store=self._memory_store,
                 )
-                # Bridge: notify external memory provider of built-in memory writes
-                if self._memory_manager and function_args.get("action") in ("add", "replace"):
+                # Bridge: notify external memory provider only after the built-in
+                # memory write succeeds. A rejected local write (for example char
+                # limit exceeded) must not leak into Honcho as a semantic conclusion.
+                if (
+                    self._memory_manager
+                    and function_args.get("action") in ("add", "replace")
+                    and isinstance(function_result, dict)
+                    and function_result.get("success") is True
+                ):
                     try:
                         self._memory_manager.on_memory_write(
                             function_args.get("action", ""),

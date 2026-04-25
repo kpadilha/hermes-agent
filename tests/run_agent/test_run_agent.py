@@ -29,6 +29,14 @@ from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 # ---------------------------------------------------------------------------
 
 
+class _RecordingMemoryManager:
+    def __init__(self):
+        self.writes = []
+
+    def on_memory_write(self, action, target, content):
+        self.writes.append((action, target, content))
+
+
 def _make_tool_defs(*names: str) -> list:
     """Build minimal tool definition list accepted by AIAgent.__init__."""
     return [
@@ -4933,3 +4941,49 @@ class TestMemoryProviderTurnStart:
         import inspect
         src = inspect.getsource(AIAgent.run_conversation)
         assert "on_turn_start(self._user_turn_count" in src
+
+
+def test_memory_provider_bridge_skips_failed_builtin_memory_write(monkeypatch):
+    manager = _RecordingMemoryManager()
+    agent = AIAgent.__new__(AIAgent)
+    agent._memory_manager = manager
+    agent._memory_store = object()
+    agent._session_db = None
+    agent.session_id = "test-session"
+
+    def fake_memory_tool(**kwargs):
+        return {"success": False, "error": "Memory at limit"}
+
+    monkeypatch.setattr("tools.memory_tool.memory_tool", fake_memory_tool)
+
+    result = agent._invoke_tool(
+        "memory",
+        {"action": "add", "target": "user", "content": "root cause preference"},
+        "task-1",
+    )
+
+    assert result["success"] is False
+    assert manager.writes == []
+
+
+def test_memory_provider_bridge_notifies_after_successful_builtin_memory_write(monkeypatch):
+    manager = _RecordingMemoryManager()
+    agent = AIAgent.__new__(AIAgent)
+    agent._memory_manager = manager
+    agent._memory_store = object()
+    agent._session_db = None
+    agent.session_id = "test-session"
+
+    def fake_memory_tool(**kwargs):
+        return {"success": True, "message": "Entry added."}
+
+    monkeypatch.setattr("tools.memory_tool.memory_tool", fake_memory_tool)
+
+    result = agent._invoke_tool(
+        "memory",
+        {"action": "add", "target": "user", "content": "root cause preference"},
+        "task-1",
+    )
+
+    assert result["success"] is True
+    assert manager.writes == [("add", "user", "root cause preference")]

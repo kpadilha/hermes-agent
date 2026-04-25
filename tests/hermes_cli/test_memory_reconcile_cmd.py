@@ -370,3 +370,31 @@ def test_memory_reconcile_refreshes_lcm_memory_runtime_status(tmp_path, capsys):
     assert lcm_memory["scorecard"]["memory_sync_health"] == "ok"
     assert lcm_memory["recent_workflow_events"][-1]["details"]["missing_as_conclusions"] == []
     assert lcm_memory["recent_workflow_events"][-1]["details"]["ledger_missing_in_graphiti"] == []
+
+
+def test_memory_reconcile_reports_honcho_duplicate_conclusion_guardrail(tmp_path, capsys):
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    (memories / "USER.md").write_text("Name: Krishna", encoding="utf-8")
+    ledger = BeliefLedger(tmp_path / "ledger.db")
+
+    memory_reconcile_command(
+        SimpleNamespace(json=True, fix=False, dry_run=False, apply_action="", honcho_peer="96809052"),
+        memory_dir=memories,
+        ledger=ledger,
+        graph_facts=[{"object": "Name: Krishna"}],
+        honcho_card=["Name: Krishna"],
+        honcho_conclusions=["Name: Krishna", "Name: Krishna"],
+        ollama_models=[],
+        snapshot_wrappers=[tmp_path / "memory-ledger-mv2.md"],
+        honcho_env={"HONCHO_UNLOAD_EMBEDDING_MODEL_AFTER_REQUEST": "true"},
+        runtime_status_writer=lambda **kwargs: None,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    honcho = payload["sources"]["honcho"]
+    assert honcho["conclusion_count"] == 2
+    assert honcho["unique_conclusion_count"] == 1
+    assert honcho["duplicate_extra_count"] == 1
+    assert payload["divergence"]["honcho_duplicate_conclusions"]["duplicate_extra_count"] == 1
+    assert any(r["code"] == "honcho_duplicate_conclusions" for r in payload["recommendations"])

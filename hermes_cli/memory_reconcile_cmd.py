@@ -7,6 +7,7 @@ import os
 import subprocess
 import urllib.error
 import urllib.request
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -370,6 +371,14 @@ def build_memory_reconcile_report(
     graph_texts = [json.dumps(f, ensure_ascii=False) for f in graph_facts]
     model_names = {m.get("name") for m in ollama_models}
     latest_wrapper = snapshot_wrappers[0] if snapshot_wrappers else None
+    conclusion_counts = Counter(item for item in honcho_conclusions if str(item).strip())
+    duplicate_conclusions = {
+        item: count for item, count in conclusion_counts.items() if count > 1
+    }
+    duplicate_total = sum(count - 1 for count in duplicate_conclusions.values())
+    peer_card_count = len(honcho_card)
+    conclusion_count = len(honcho_conclusions)
+    conclusion_to_card_ratio = round(conclusion_count / peer_card_count, 2) if peer_card_count else None
 
     divergence = {
         "user_missing_in_honcho_card": _contains_entry(user_entries, honcho_card),
@@ -379,6 +388,14 @@ def build_memory_reconcile_report(
             [str(r.get("object") or "") for r in ledger_records if r.get("status") == "active"],
             graph_texts,
         ),
+        "honcho_duplicate_conclusions": {
+            "duplicate_extra_count": duplicate_total,
+            "duplicate_content_count": len(duplicate_conclusions),
+            "examples": [
+                {"content": content, "count": count}
+                for content, count in list(duplicate_conclusions.items())[:10]
+            ],
+        },
     }
     recommendations = []
     if divergence["user_missing_in_honcho_card"]:
@@ -389,6 +406,21 @@ def build_memory_reconcile_report(
         recommendations.append({"code": "ledger_active_conflicts", "severity": "fail"})
     if divergence["ledger_missing_in_graphiti"]:
         recommendations.append({"code": "graphiti_projection_stale", "severity": "warn"})
+    if duplicate_total:
+        recommendations.append({
+            "code": "honcho_duplicate_conclusions",
+            "severity": "warn",
+            "duplicate_extra_count": duplicate_total,
+            "duplicate_content_count": len(duplicate_conclusions),
+        })
+    if conclusion_to_card_ratio is not None and conclusion_to_card_ratio > 10:
+        recommendations.append({
+            "code": "honcho_conclusion_volume_high",
+            "severity": "info",
+            "conclusion_count": conclusion_count,
+            "peer_card_count": peer_card_count,
+            "ratio": conclusion_to_card_ratio,
+        })
     if not latest_wrapper:
         recommendations.append({"code": "memvid_snapshot_missing", "severity": "warn"})
     if honcho_env.get("HONCHO_UNLOAD_EMBEDDING_MODEL_AFTER_REQUEST", "").lower() != "true":
@@ -406,7 +438,13 @@ def build_memory_reconcile_report(
             "user_md": {"path": str(memory_dir / "USER.md"), "count": len(user_entries)},
             "memory_md": {"path": str(memory_dir / "MEMORY.md"), "count": len(memory_entries)},
             "ledger": {"db_path": str(ledger.db_path), "records": sum(ledger_audit.get("records", {}).values()) if isinstance(ledger_audit.get("records"), dict) else 0, "audit": ledger_audit},
-            "honcho": {"peer_card_count": len(honcho_card), "conclusion_count": len(honcho_conclusions)},
+            "honcho": {
+                "peer_card_count": peer_card_count,
+                "conclusion_count": conclusion_count,
+                "unique_conclusion_count": len(conclusion_counts),
+                "duplicate_extra_count": duplicate_total,
+                "conclusion_to_card_ratio": conclusion_to_card_ratio,
+            },
             "graphiti": {"facts": len(graph_facts)},
             "memvid": {"latest_wrapper": str(latest_wrapper) if latest_wrapper else None},
         },
