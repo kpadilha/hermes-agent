@@ -367,7 +367,7 @@ def build_memory_reconcile_report(
     memory_entries = _read_entries(memory_dir / "MEMORY.md")
     ledger_audit = ledger.audit()
     active_conflicts = ledger.find_active_conflicts()
-    ledger_records = ledger.search("", limit=10000)
+    ledger_records = ledger.list_records()
     graph_texts = [json.dumps(f, ensure_ascii=False) for f in graph_facts]
     model_names = {m.get("name") for m in ollama_models}
     latest_wrapper = snapshot_wrappers[0] if snapshot_wrappers else None

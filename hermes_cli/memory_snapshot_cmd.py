@@ -188,7 +188,7 @@ def memory_snapshot_command(
     sdk = _load_memvid_sdk(memvid_sdk)
     output = Path(getattr(args, "output", "") or "memory-ledger.mv2").expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
-    records = ledger.search("", limit=10000)
+    records = ledger.list_records()
     created_at = datetime.now(timezone.utc).isoformat()
     memory = sdk.create(
         str(output),

@@ -133,3 +133,51 @@ def test_add_vertex_threshold_checks_warns_for_unknown_scores():
     assert statuses["vertex_memory"] == "OK"
     assert statuses["vertex_lcm"] == "WARN"
     assert statuses["vertex_overall"] == "OK"
+
+
+def test_check_operational_silent_bug_audit_reports_ok(monkeypatch, tmp_path):
+    module = _load_module()
+    cr = module.CheckResult()
+    repo = tmp_path / "repo"
+    venv_python = repo / "venv" / "bin" / "python"
+    audit_script = repo / "scripts" / "operational_silent_bug_audit.py"
+    venv_python.parent.mkdir(parents=True)
+    audit_script.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+    audit_script.write_text("", encoding="utf-8")
+    monkeypatch.setattr(module, "HERMES_AGENT_REPO", repo)
+
+    class Result:
+        returncode = 0
+        stdout = '{"success": true, "finding_count": 0, "findings": []}\n'
+        stderr = ""
+
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: Result())
+
+    module.check_operational_silent_bug_audit(cr)
+
+    assert any(item["name"] == "operational_silent_bug_audit" and item["status"] == "OK" for item in cr.results)
+
+
+def test_check_operational_silent_bug_audit_fails_on_findings(monkeypatch, tmp_path):
+    module = _load_module()
+    cr = module.CheckResult()
+    repo = tmp_path / "repo"
+    venv_python = repo / "venv" / "bin" / "python"
+    audit_script = repo / "scripts" / "operational_silent_bug_audit.py"
+    venv_python.parent.mkdir(parents=True)
+    audit_script.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+    audit_script.write_text("", encoding="utf-8")
+    monkeypatch.setattr(module, "HERMES_AGENT_REPO", repo)
+
+    class Result:
+        returncode = 0
+        stdout = '{"success": false, "finding_count": 1, "findings": [{"severity": "fail", "code": "ledger_all_records_fixed_limit"}]}\n'
+        stderr = ""
+
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: Result())
+
+    module.check_operational_silent_bug_audit(cr)
+
+    assert any(item["name"] == "operational_silent_bug_audit" and item["status"] == "FAIL" for item in cr.results)

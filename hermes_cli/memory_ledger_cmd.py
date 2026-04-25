@@ -134,7 +134,7 @@ def memory_ledger_command(args, *, ledger: Optional[BeliefLedger] = None) -> Non
         fmt = getattr(args, "format", "markdown") or "markdown"
         output = Path(getattr(args, "output", "") or "memory-ledger-export.md")
         output.parent.mkdir(parents=True, exist_ok=True)
-        records = ledger.search("", limit=10000)
+        records = ledger.list_records()
         payload = {
             "ledger": ledger.audit(),
             "records": records,
@@ -169,7 +169,7 @@ def memory_ledger_command(args, *, ledger: Optional[BeliefLedger] = None) -> Non
         return
 
     if cmd == "contradictions":
-        superseded = [row for row in ledger.search("", limit=1000) if row.get("status") == "superseded"]
+        superseded = ledger.list_records(status="superseded")
         active_conflicts = ledger.find_active_conflicts()
         payload = {
             "superseded_count": len(superseded),

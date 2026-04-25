@@ -228,6 +228,24 @@ class BeliefLedger:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_records(self, *, status: str | None = None) -> List[Dict[str, Any]]:
+        """Return all ledger records without a silent fixed cap.
+
+        Projection/reconciliation paths must not call search("", limit=N) as a
+        proxy for "all records". A fixed cap silently hides records once the
+        ledger grows past that value, recreating the class of bug seen with
+        paginated Honcho conclusions.
+        """
+        with self._connect() as conn:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM memory_records WHERE status = ? ORDER BY id DESC",
+                    (status,),
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM memory_records ORDER BY id DESC").fetchall()
+        return [dict(row) for row in rows]
+
     def find_active_conflicts(self) -> Dict[str, Any]:
         with self._connect() as conn:
             rows = conn.execute(

@@ -164,3 +164,24 @@ def test_ledger_find_active_conflicts_groups_same_subject_predicate(tmp_path):
     assert conflicts["conflict_count"] == 1
     assert conflicts["conflicts"][0]["subject"] == "Krishna"
     assert len(conflicts["conflicts"][0]["records"]) == 2
+
+
+def test_ledger_list_records_returns_all_records_without_search_cap(tmp_path):
+    ledger = BeliefLedger(tmp_path / "memory-ledger.db")
+    for i in range(25):
+        ledger.add_record({
+            "type": "fact",
+            "subject": "Record",
+            "predicate": "states",
+            "object": f"record-{i}",
+            "source": "test",
+            "evidence_ref": f"test#{i}",
+            "storage_targets": "memory",
+            "status": "superseded" if i % 2 else "active",
+        })
+
+    assert len(ledger.search("", limit=10)) == 10
+    assert len(ledger.list_records()) == 25
+    superseded = ledger.list_records(status="superseded")
+    assert len(superseded) == 12
+    assert {row["status"] for row in superseded} == {"superseded"}

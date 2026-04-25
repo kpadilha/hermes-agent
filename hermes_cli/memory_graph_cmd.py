@@ -69,7 +69,7 @@ def _active_krishna_preference_count(edges: Iterable[Dict[str, Any]]) -> int:
 
 
 def _ledger_records(ledger: BeliefLedger) -> list[Dict[str, Any]]:
-    return ledger.search("", limit=100000)
+    return ledger.list_records()
 
 
 def build_graph_sync_plan(
