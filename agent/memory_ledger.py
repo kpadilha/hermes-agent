@@ -278,7 +278,12 @@ class BeliefLedger:
         conflicts = []
         for (subject, predicate), records in groups.items():
             unique_objects = {r.get("object") for r in records}
-            if len(records) > 1 and len(unique_objects) > 1:
+            conflict_sensitive = any(
+                r.get("type") in {"preference", "expectation", "belief"}
+                or r.get("predicate") in {"prefers", "expects"}
+                for r in records
+            )
+            if conflict_sensitive and len(records) > 1 and len(unique_objects) > 1:
                 conflicts.append({
                     "subject": subject,
                     "predicate": predicate,
@@ -355,7 +360,7 @@ class MemoryWriteGate:
         superseded: Optional[Dict[str, Any]] = None
         if old_content:
             superseded = self.ledger.find_exact_active(old_content)
-        if superseded is None:
+        if superseded is None and record.get("type") in {"preference", "expectation", "belief"}:
             candidates = self.ledger.find_active_subject_predicate(
                 record["subject"], record["predicate"]
             )

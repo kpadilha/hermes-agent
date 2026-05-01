@@ -167,6 +167,33 @@ def test_add_vertex_threshold_checks_warns_for_unknown_scores():
     assert statuses["vertex_overall"] == "OK"
 
 
+def test_run_checks_refreshes_memory_reconcile_before_gateway_architecture(monkeypatch):
+    module = _load_module()
+    calls = []
+
+    for name in [
+        "check_gateway",
+        "check_docker",
+        "check_honcho_deriver_policy",
+        "check_disk",
+        "check_memory",
+        "check_fallback_ping",
+        "check_auxiliary",
+        "check_gateway_health_payload",
+        "check_memory_eval",
+        "check_memory_reconcile",
+        "check_operational_silent_bug_audit",
+        "check_cron_scorecard",
+        "check_backup_freshness",
+    ]:
+        monkeypatch.setattr(module, name, lambda *args, _name=name, **kwargs: calls.append(_name))
+    monkeypatch.setattr(module, "check_model_ping", lambda cr: calls.append("check_model_ping") or {})
+
+    module.run_checks(module.CheckResult())
+
+    assert calls.index("check_memory_reconcile") < calls.index("check_gateway_health_payload")
+
+
 def test_check_operational_silent_bug_audit_reports_ok(monkeypatch, tmp_path):
     module = _load_module()
     cr = module.CheckResult()
@@ -309,3 +336,40 @@ def test_check_backup_freshness_ok_with_recent_state(monkeypatch, tmp_path):
     module.check_backup_freshness(cr)
 
     assert any(item["name"] == "backup_freshness" and item["status"] == "OK" for item in cr.results)
+
+
+def test_check_honcho_deriver_policy_passes_when_deriver_disabled(monkeypatch):
+    module = _load_module()
+    cr = module.CheckResult()
+
+    class Result:
+        returncode = 0
+        stdout = "DERIVER_ENABLED=false\nDERIVER_FLUSH_ENABLED=false\n"
+        stderr = ""
+
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: Result())
+
+    module.check_honcho_deriver_policy(cr)
+
+    assert cr.failures == []
+    assert cr.results[-1]["name"] == "honcho_deriver_policy"
+    assert cr.results[-1]["status"] == "OK"
+
+
+def test_check_honcho_deriver_policy_fails_when_deriver_enabled(monkeypatch):
+    module = _load_module()
+    cr = module.CheckResult()
+
+    class Result:
+        returncode = 0
+        stdout = "DERIVER_ENABLED=true\nDERIVER_FLUSH_ENABLED=true\n"
+        stderr = ""
+
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: Result())
+
+    module.check_honcho_deriver_policy(cr)
+
+    assert cr.failures
+    assert cr.results[-1]["name"] == "honcho_deriver_policy"
+    assert cr.results[-1]["status"] == "FAIL"
+    assert "DERIVER_ENABLED=true" in cr.results[-1]["detail"]

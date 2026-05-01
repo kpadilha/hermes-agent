@@ -168,6 +168,60 @@ def test_ledger_find_active_conflicts_groups_same_subject_predicate(tmp_path):
     assert len(conflicts["conflicts"][0]["records"]) == 2
 
 
+def test_ledger_active_conflicts_ignores_independent_system_facts(tmp_path):
+    ledger = BeliefLedger(tmp_path / "memory-ledger.db")
+    ledger.add_record({
+        "type": "fact",
+        "subject": "system",
+        "predicate": "uses",
+        "object": "Graphiti discovery uses full_text for long facts.",
+        "source": "test",
+        "evidence_ref": "e1",
+        "confidence": 0.7,
+        "storage_targets": "memory",
+    })
+    ledger.add_record({
+        "type": "fact",
+        "subject": "system",
+        "predicate": "uses",
+        "object": "Content Skill Graph uses wikilinks for editorial profiles.",
+        "source": "test",
+        "evidence_ref": "e2",
+        "confidence": 0.7,
+        "storage_targets": "memory",
+    })
+
+    conflicts = ledger.find_active_conflicts()
+
+    assert conflicts["conflict_count"] == 0
+
+
+def test_write_gate_does_not_supersede_unrelated_system_facts_with_generic_predicate(tmp_path):
+    ledger = BeliefLedger(tmp_path / "memory-ledger.db")
+    gate = MemoryWriteGate(ledger)
+
+    first = gate.evaluate_and_record(
+        target="memory",
+        content="Graphiti discovery uses full_text for long facts.",
+        source="memory_tool:add:memory",
+        evidence_ref="memory:MEMORY.md#graphiti",
+    )
+    second = gate.evaluate_and_record(
+        target="memory",
+        content="Content Skill Graph uses wikilinks for editorial profiles.",
+        source="memory_tool:add:memory",
+        evidence_ref="memory:MEMORY.md#content",
+    )
+
+    assert first["operation"] == "ADD"
+    assert second["operation"] == "ADD"
+    rows = ledger.list_records(status="active")
+    assert {row["object"] for row in rows} == {
+        "Graphiti discovery uses full_text for long facts.",
+        "Content Skill Graph uses wikilinks for editorial profiles.",
+    }
+
+
 def test_ledger_list_records_returns_all_records_without_search_cap(tmp_path):
     ledger = BeliefLedger(tmp_path / "memory-ledger.db")
     for i in range(25):

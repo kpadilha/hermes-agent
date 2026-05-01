@@ -143,6 +143,7 @@ _DEEPSEEK_CANONICAL_MODELS: frozenset[str] = frozenset({
 # with ``model=deepseek/deepseek-v4-flash``, so these names are not aliases
 # of ``deepseek-chat`` and must not be folded into it.
 _DEEPSEEK_V_SERIES_RE = re.compile(r"^deepseek-v\d+([-.].+)?$")
+_DEEPSEEK_COMPACT_V_SERIES_RE = re.compile(r"^deepseekv(\d+)([-.].+)$")
 
 
 def _normalize_for_deepseek(model_name: str) -> str:
@@ -171,6 +172,11 @@ def _normalize_for_deepseek(model_name: str) -> str:
     # V-series first-class IDs (v4-pro, v4-flash, future v5-*, dated variants)
     if _DEEPSEEK_V_SERIES_RE.match(bare):
         return bare
+
+    # Common compact user alias: deepseekv4-pro -> deepseek-v4-pro.
+    compact_v = _DEEPSEEK_COMPACT_V_SERIES_RE.match(bare)
+    if compact_v:
+        return f"deepseek-v{compact_v.group(1)}{compact_v.group(2)}"
 
     # Check for reasoner-like keywords anywhere in the name
     for keyword in _DEEPSEEK_REASONER_KEYWORDS:

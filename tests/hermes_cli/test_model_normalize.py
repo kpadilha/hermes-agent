@@ -207,6 +207,7 @@ class TestDeepseekVSeriesPassThrough:
 
     @pytest.mark.parametrize("model", [
         "deepseek-v4-pro",
+        "deepseekv4-pro",                    # common user alias without second hyphen
         "deepseek-v4-flash",
         "deepseek/deepseek-v4-pro",          # vendor-prefixed
         "deepseek/deepseek-v4-flash",
@@ -217,6 +218,8 @@ class TestDeepseekVSeriesPassThrough:
     ])
     def test_v_series_passes_through(self, model):
         expected = model.split("/", 1)[-1].lower()
+        if expected == "deepseekv4-pro":
+            expected = "deepseek-v4-pro"
         assert _normalize_for_deepseek(model) == expected
 
     def test_deepseek_provider_preserves_v4_pro(self):

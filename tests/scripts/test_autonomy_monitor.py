@@ -24,6 +24,7 @@ def test_build_status_extracts_memory_infra_and_kb_signals():
             "sources": {"graphiti": {"facts": 10}},
             "freshness": {"memvid_snapshot": {"status": "fresh"}},
             "runtime": {"ollama": {"nomic_loaded": False}},
+            "auto_remediations": [{"id": "sync_memory_ledger_to_graphiti", "status": "ok"}],
         },
         kb_lint_payload={"returncode": 0, "stdout": "✓ KB is clean — zero issues found."},
         kb_index_payload={"returncode": 0, "stdout": "Done: 381 chunks indexed, 86 unchanged, 0 errors"},
@@ -34,6 +35,7 @@ def test_build_status_extracts_memory_infra_and_kb_signals():
     assert status["checks"]["infra"]["status"] == "ok"
     assert status["checks"]["kb"]["status"] == "ok"
     assert status["checks"]["memory"]["details"]["graph_facts"] == 10
+    assert status["checks"]["memory"]["details"]["auto_remediations"][0]["id"] == "sync_memory_ledger_to_graphiti"
 
 
 def test_build_status_marks_fail_recommendation_as_degraded():
@@ -154,3 +156,63 @@ def test_run_json_parses_warning_exit_json(monkeypatch):
     assert payload["healthy"] is False
     assert payload["_nonzero_returncode"] == 2
     assert "_error" not in payload
+
+
+def test_apply_safe_remediations_runs_known_idempotent_repairs(monkeypatch):
+    module = _load_module()
+    calls = []
+
+    def fake_run_json(command, **kwargs):
+        calls.append(command)
+        if "graph" in command:
+            return {"applied": True, "upserted": 2}
+        if "ollama" in command:
+            return {"expectations": {"nomic_embedding_transient_ok": True}}
+        return {"apply_result": {"success": True, "validation": {"duplicate_extra_count_after": 0}}}
+
+    monkeypatch.setattr(module, "run_json", fake_run_json)
+
+    actions = module.apply_safe_remediations({
+        "recommendations": [
+            {"code": "graphiti_projection_stale", "severity": "warn"},
+            {"code": "honcho_duplicate_conclusions", "severity": "warn"},
+            {"code": "ollama_embedding_model_resident", "severity": "warn"},
+        ]
+    })
+
+    assert [action["id"] for action in actions] == [
+        "sync_memory_ledger_to_graphiti",
+        "delete_exact_duplicate_honcho_conclusions",
+        "unload_transient_ollama_embedding_model",
+    ]
+    assert all(action["status"] == "ok" for action in actions)
+    assert any("--apply" in command for command in calls)
+    assert any("delete_exact_duplicate_honcho_conclusions" in command for command in calls)
+    assert any("--fix" in command and "ollama" in command for command in calls)
+
+
+def test_collect_status_reruns_reconcile_after_auto_remediation(monkeypatch):
+    module = _load_module()
+    calls = {"reconcile": 0, "health": 0}
+
+    def fake_run_json(command, **kwargs):
+        joined = " ".join(map(str, command))
+        if "health_check.py" in joined:
+            calls["health"] += 1
+            return {"healthy": True, "summary": "OK", "failures": [], "warnings": []}
+        if "memory reconcile --json" in joined:
+            calls["reconcile"] += 1
+            if calls["reconcile"] == 1:
+                return {"recommendations": [{"code": "graphiti_projection_stale", "severity": "warn"}]}
+            return {"recommendations": []}
+        return {}
+
+    monkeypatch.setattr(module, "run_json", fake_run_json)
+    monkeypatch.setattr(module, "apply_safe_remediations", lambda payload: [{"id": "sync_memory_ledger_to_graphiti", "status": "ok"}])
+    monkeypatch.setattr(module, "run_text", lambda *args, **kwargs: {"returncode": 0, "stdout": "clean", "stderr": ""})
+
+    status = module.collect_status()
+
+    assert calls["reconcile"] == 2
+    assert status["overall"] == "ok"
+    assert status["checks"]["memory"]["details"]["auto_remediations"][0]["status"] == "ok"

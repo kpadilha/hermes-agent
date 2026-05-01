@@ -115,18 +115,50 @@ def _honcho_is_configured_for_doctor() -> bool:
 
 def _apply_doctor_tool_availability_overrides(available: list[str], unavailable: list[dict]) -> tuple[list[str], list[dict]]:
     """Adjust runtime-gated tool availability for doctor diagnostics."""
-    if not _honcho_is_configured_for_doctor():
-        return available, unavailable
+    honcho_configured = _honcho_is_configured_for_doctor()
+    rl_enabled = _rl_toolset_enabled_for_doctor()
 
     updated_available = list(available)
     updated_unavailable = []
     for item in unavailable:
-        if item.get("name") == "honcho":
+        if item.get("name") == "honcho" and honcho_configured:
             if "honcho" not in updated_available:
                 updated_available.append("honcho")
             continue
+        if item.get("name") == "rl" and not rl_enabled:
+            continue
         updated_unavailable.append(item)
     return updated_available, updated_unavailable
+
+
+def _rl_toolset_enabled_for_doctor() -> bool:
+    """Return True when RL tooling is explicitly enabled for any platform.
+
+    The Tinker-Atropos submodule backs the optional ``rl`` toolset. Fresh
+    installs intentionally keep that toolset off by default, so doctor should
+    not warn about a missing heavy submodule unless the user actually enabled
+    RL for a platform.
+    """
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.tools_config import PLATFORMS, _get_platform_tools
+
+        cfg = load_config()
+        configured_platforms = set((cfg.get("platform_toolsets") or {}).keys())
+        platforms_to_check = configured_platforms | {"cli"}
+
+        for platform in platforms_to_check:
+            if platform not in PLATFORMS:
+                continue
+            if "rl" in _get_platform_tools(
+                cfg,
+                platform,
+                include_default_mcp_servers=False,
+            ):
+                return True
+    except Exception:
+        return False
+    return False
 
 
 def check_ok(text: str, detail: str = ""):
@@ -251,6 +283,8 @@ def run_doctor(args):
             check_ok(name, "(optional)")
         except ImportError:
             check_warn(name, "(optional, not installed)")
+        except Exception as e:
+            check_warn(name, f"(optional, import failed: {type(e).__name__})")
     
     # =========================================================================
     # Check: Configuration files
@@ -1185,9 +1219,11 @@ def run_doctor(args):
     print()
     print(color("◆ Submodules", Colors.CYAN, Colors.BOLD))
     
-    # tinker-atropos (RL training backend)
+    # tinker-atropos (optional RL training backend)
     tinker_dir = PROJECT_ROOT / "tinker-atropos"
-    if tinker_dir.exists() and (tinker_dir / "pyproject.toml").exists():
+    if not _rl_toolset_enabled_for_doctor():
+        check_ok("tinker-atropos", "(RL training backend disabled)")
+    elif tinker_dir.exists() and (tinker_dir / "pyproject.toml").exists():
         if py_version >= (3, 11):
             try:
                 __import__("tinker_atropos")

@@ -406,11 +406,12 @@ def test_memory_reconcile_lcm_memory_uses_fail_severity_not_warn_info(tmp_path):
 
     report = {
         "divergence": {
-            "user_missing_in_honcho_card": [],
+            "user_missing_in_honcho_card": ["warning peer-card projection lag"],
             "user_missing_in_honcho_conclusions": ["informational semantic lag"],
             "ledger_missing_in_graphiti": ["warning projection lag"],
         },
         "recommendations": [
+            {"code": "honcho_card_missing_user_entries", "severity": "warn"},
             {"code": "honcho_conclusions_missing_user_entries", "severity": "info"},
             {"code": "graphiti_projection_stale", "severity": "warn"},
         ],
@@ -488,6 +489,7 @@ def test_memory_reconcile_reports_read_only_honcho_hygiene(tmp_path):
         honcho_conclusions=[
             {"id": "c1", "content": "Name: Krishna", "created_at": "2026-01-01T00:00:00Z"},
             {"id": "c2", "content": "Name: Krishna", "created_at": "2026-01-02T00:00:00Z"},
+            {"id": "c2", "content": "Name: Krishna", "created_at": "2026-01-02T00:00:00Z"},
             {"id": "c3", "content": "Old fact", "created_at": "2026-01-03T00:00:00Z"},
         ],
         ollama_models=[],
@@ -522,6 +524,25 @@ def test_build_fix_plan_includes_exact_honcho_duplicate_dedupe_dry_run():
     action = next(a for a in plan["proposed_actions"] if a["id"] == "delete_exact_duplicate_honcho_conclusions")
     assert action["mutates"] is False
     assert action["items"] == [{"content": "Name: Krishna", "keep_id": "c1", "delete_candidate_ids": ["c2"]}]
+
+
+def test_discover_honcho_conclusions_deduplicates_repeated_page_items():
+    from hermes_cli.memory_reconcile_cmd import _discover_honcho_conclusions
+
+    def fake_http(method, url, payload=None, timeout=10):
+        return {
+            "items": [
+                {"id": "c1", "content": "Name: Krishna"},
+                {"id": "c1", "content": "Name: Krishna"},
+                {"id": "c2", "content": "Name: Krishna"},
+            ],
+            "page": 1,
+            "pages": 1,
+        }
+
+    conclusions = _discover_honcho_conclusions(http_json=fake_http)
+
+    assert conclusions == ["Name: Krishna", "Name: Krishna"]
 
 
 def test_delete_exact_duplicate_honcho_conclusions_dry_run_does_not_delete():

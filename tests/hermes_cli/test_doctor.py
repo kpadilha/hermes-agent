@@ -75,6 +75,48 @@ class TestDoctorToolAvailabilityOverrides:
         assert available == []
         assert unavailable == [honcho_entry]
 
+    def test_hides_rl_availability_warning_when_rl_toolset_is_disabled(self, monkeypatch):
+        monkeypatch.setattr(doctor, "_honcho_is_configured_for_doctor", lambda: False)
+        monkeypatch.setattr(doctor, "_rl_toolset_enabled_for_doctor", lambda: False)
+
+        available, unavailable = doctor._apply_doctor_tool_availability_overrides(
+            [],
+            [{"name": "rl", "missing_vars": ["TINKER_API_KEY", "WANDB_API_KEY"]}],
+        )
+
+        assert available == []
+        assert unavailable == []
+
+    def test_keeps_rl_availability_warning_when_rl_toolset_is_enabled(self, monkeypatch):
+        monkeypatch.setattr(doctor, "_honcho_is_configured_for_doctor", lambda: False)
+        monkeypatch.setattr(doctor, "_rl_toolset_enabled_for_doctor", lambda: True)
+
+        rl_entry = {"name": "rl", "missing_vars": ["TINKER_API_KEY", "WANDB_API_KEY"]}
+        available, unavailable = doctor._apply_doctor_tool_availability_overrides([], [rl_entry])
+
+        assert available == []
+        assert unavailable == [rl_entry]
+
+
+class TestDoctorRlSubmoduleGate:
+    def test_rl_submodule_check_is_disabled_when_rl_toolset_is_off(self, monkeypatch):
+        import hermes_cli.config as config_mod
+        import hermes_cli.tools_config as tools_config_mod
+
+        monkeypatch.setattr(config_mod, "load_config", lambda: {"platform_toolsets": {"cli": ["web"]}})
+        monkeypatch.setattr(tools_config_mod, "_get_platform_tools", lambda *a, **kw: {"web"})
+
+        assert not doctor._rl_toolset_enabled_for_doctor()
+
+    def test_rl_submodule_check_is_enabled_when_rl_toolset_is_on(self, monkeypatch):
+        import hermes_cli.config as config_mod
+        import hermes_cli.tools_config as tools_config_mod
+
+        monkeypatch.setattr(config_mod, "load_config", lambda: {"platform_toolsets": {"cli": ["rl"]}})
+        monkeypatch.setattr(tools_config_mod, "_get_platform_tools", lambda *a, **kw: {"rl"})
+
+        assert doctor._rl_toolset_enabled_for_doctor()
+
 
 class TestHonchoDoctorConfigDetection:
     def test_reports_configured_when_enabled_with_api_key(self, monkeypatch):

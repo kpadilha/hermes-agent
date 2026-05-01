@@ -106,6 +106,26 @@ def test_resolve_codex_runtime_credentials_refreshes_expiring_token(tmp_path, mo
     assert resolved["api_key"] == "access-new"
 
 
+def test_resolve_codex_runtime_credentials_proactively_refreshes_inside_warning_window(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes"
+    expiring_token = _jwt_with_exp(int(time.time()) + 6 * 86400)
+    _setup_hermes_auth(hermes_home, access_token=expiring_token, refresh_token="refresh-old")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    called = {"count": 0}
+
+    def _fake_refresh(tokens, timeout_seconds):
+        called["count"] += 1
+        return {"access_token": "access-new", "refresh_token": "refresh-new"}
+
+    monkeypatch.setattr("hermes_cli.auth._refresh_codex_auth_tokens", _fake_refresh)
+
+    resolved = resolve_codex_runtime_credentials()
+
+    assert called["count"] == 1
+    assert resolved["api_key"] == "access-new"
+
+
 def test_resolve_codex_runtime_credentials_force_refresh(tmp_path, monkeypatch):
     hermes_home = tmp_path / "hermes"
     _setup_hermes_auth(hermes_home, access_token="access-current", refresh_token="refresh-old")

@@ -214,6 +214,16 @@ def build_honcho_hygiene_report(
 ) -> dict[str, Any]:
     """Build a read-only hygiene report for visible Honcho conclusions."""
     items = _normalize_conclusion_items(honcho_conclusions)
+    unique_items: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for item in items:
+        item_id = str(item.get("id") or item.get("conclusion_id") or "")
+        if item_id:
+            if item_id in seen_ids:
+                continue
+            seen_ids.add(item_id)
+        unique_items.append(item)
+    items = unique_items
     by_content: dict[str, list[dict[str, Any]]] = {}
     for item in items:
         by_content.setdefault(item["content"], []).append(item)
@@ -268,6 +278,7 @@ def _discover_honcho_conclusions(
     observed_id = observed_id or os.environ.get("HONCHO_USER_PEER_ID") or "96809052"
     payload = {"filters": {"observer_id": observer_id, "observed_id": observed_id}}
     contents: list[str] = []
+    seen_ids: set[str] = set()
     page = 1
     size = 100
     try:
@@ -275,7 +286,15 @@ def _discover_honcho_conclusions(
             endpoint = f"{base_url.rstrip('/')}/workspaces/{workspace_id}/conclusions/list?size={size}&page={page}"
             response = http_json("POST", endpoint, payload, timeout=15)
             batch = _normalize_honcho_conclusion_payload(response)
-            contents.extend(_conclusion_contents(batch))
+            for item in _normalize_conclusion_items(batch):
+                item_id = str(item.get("id") or item.get("conclusion_id") or "")
+                if item_id:
+                    if item_id in seen_ids:
+                        continue
+                    seen_ids.add(item_id)
+                content = str(item.get("content") or "").strip()
+                if content:
+                    contents.append(content)
             if not isinstance(response, dict):
                 break
             pages = int(response.get("pages") or 1)
@@ -685,12 +704,12 @@ def build_lcm_memory_state(report: Dict[str, Any]) -> Dict[str, Any]:
     missing_conclusions = divergence.get("user_missing_in_honcho_conclusions") or []
     missing_graph = divergence.get("ledger_missing_in_graphiti") or []
     # Keep the LCM proof severity aligned with the reconcile report severity.
-    # Missing Honcho conclusions and stale Graphiti projections are intentionally
+    # Missing Honcho card/conclusions and stale Graphiti projections are intentionally
     # warn/info recommendations in the report: they should remain visible in the
     # proof details, but must not turn the architecture dashboard red unless a
     # fail-severity invariant is violated. Otherwise a non-blocking reconcile
     # recommendation can poison gateway health until a manual proof refresh.
-    success = not fail_recs and not missing_card
+    success = not fail_recs
     event = {
         "workflow": "memory_reconcile_projection",
         "outcome": "success" if success else "failure",
