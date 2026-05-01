@@ -3,6 +3,8 @@
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
+from run_agent import AIAgent
+
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig

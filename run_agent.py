@@ -5208,7 +5208,7 @@ class AIAgent:
         return merged
 
     @staticmethod
-def _extract_text_content(content: Any) -> str:
+    def _extract_text_content(content: Any) -> str:
         """Best-effort plain-text extraction from message content."""
         if isinstance(content, str):
             return content.strip()
