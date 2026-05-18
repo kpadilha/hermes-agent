@@ -32,3 +32,12 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
         "--target", choices=["all", "memory", "user"], default="all",
         help="Which store to reset: 'all' (default), 'memory', or 'user'")
     memory_parser.set_defaults(func=cmd_memory)
+    # Native CLI registrars only own top-level commands, and discovery normally
+    # skips built-ins. Reuse the registered alias on this existing parser to
+    # preserve local `memory ...` callers without importing plugin code here.
+    from hermes_cli.plugins import discover_plugins, get_plugin_manager
+
+    discover_plugins()
+    extension = get_plugin_manager()._cli_commands.get("memory-local")
+    if extension is not None:
+        extension["setup_fn"](memory_parser)
