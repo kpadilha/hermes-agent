@@ -1,4 +1,6 @@
 import json
+import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -43,6 +45,29 @@ def test_build_memory_reconcile_report_reports_sources_and_recommendations(tmp_p
     assert report["runtime"]["ollama"]["qwen35_loaded"] is True
     assert report["runtime"]["honcho"]["unload_embedding_after_request"] is True
     assert any(r["code"] == "honcho_conclusions_missing_user_entries" for r in report["recommendations"])
+
+
+def test_build_memory_reconcile_report_warns_on_stale_memvid_snapshot(tmp_path):
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    wrapper = tmp_path / "memory-ledger-mv2.md"
+    wrapper.write_text("# snapshot wrapper", encoding="utf-8")
+    old = time.time() - (8 * 24 * 60 * 60)
+    os.utime(wrapper, (old, old))
+    ledger = BeliefLedger(tmp_path / "ledger.db")
+
+    report = build_memory_reconcile_report(
+        memory_dir=memories,
+        ledger=ledger,
+        graph_facts=[],
+        honcho_card=[],
+        honcho_conclusions=[],
+        ollama_models=[{"name": "phi4-mini:latest"}, {"name": "qwen3.5:latest"}],
+        snapshot_wrappers=[wrapper],
+        honcho_env={"HONCHO_UNLOAD_EMBEDDING_MODEL_AFTER_REQUEST": "true"},
+    )
+
+    assert any(r["code"] == "memvid_snapshot_stale" for r in report["recommendations"])
 
 
 def test_memory_reconcile_command_outputs_json(tmp_path, capsys):
