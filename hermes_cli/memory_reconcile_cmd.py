@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from agent.memory_ledger import BeliefLedger
+from hermes_cli.memory_paths import default_memory_snapshot_dir
 from tools.memory_tool import ENTRY_DELIMITER, get_memory_dir
 
 
@@ -36,8 +37,18 @@ def _path_age_seconds(path: Path) -> float | None:
         return None
 
 
+def _snapshot_freshness_code(age_seconds: float | None) -> str | None:
+    if age_seconds is None:
+        return None
+    if age_seconds > 30 * 24 * 60 * 60:
+        return "memvid_snapshot_old"
+    if age_seconds > 7 * 24 * 60 * 60:
+        return "memvid_snapshot_stale"
+    return None
+
+
 def _discover_snapshot_wrappers() -> list[Path]:
-    root = Path("~/obsidian-vault/Krishna/niko/operations/memory-snapshots").expanduser()
+    root = default_memory_snapshot_dir()
     if not root.exists():
         return []
     return sorted(root.glob("*-mv2.md"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -562,6 +573,7 @@ def build_memory_reconcile_report(
     graph_texts = [json.dumps(f, ensure_ascii=False) for f in graph_facts]
     model_names = {m.get("name") for m in ollama_models}
     latest_wrapper = snapshot_wrappers[0] if snapshot_wrappers else None
+    latest_wrapper_age = _path_age_seconds(latest_wrapper) if latest_wrapper else None
     honcho_conclusion_texts = _conclusion_texts(honcho_conclusions)
     conclusion_counts = Counter(item for item in honcho_conclusion_texts if str(item).strip())
     duplicate_conclusions = {
@@ -626,6 +638,10 @@ def build_memory_reconcile_report(
         })
     if not latest_wrapper:
         recommendations.append({"code": "memvid_snapshot_missing", "severity": "warn"})
+    else:
+        freshness_code = _snapshot_freshness_code(latest_wrapper_age)
+        if freshness_code:
+            recommendations.append({"code": freshness_code, "severity": "warn"})
     if honcho_env.get("HONCHO_UNLOAD_EMBEDDING_MODEL_AFTER_REQUEST", "").lower() != "true":
         recommendations.append({"code": "honcho_embedding_unload_disabled", "severity": "warn"})
     if "nomic-embed-text:latest" in model_names:
@@ -652,7 +668,7 @@ def build_memory_reconcile_report(
             "memvid": {"latest_wrapper": str(latest_wrapper) if latest_wrapper else None},
         },
         "freshness": {
-            "memvid_latest_wrapper_age_seconds": _path_age_seconds(latest_wrapper) if latest_wrapper else None,
+            "memvid_latest_wrapper_age_seconds": latest_wrapper_age,
         },
         "discovery_errors": discovery_errors,
         "runtime": {
