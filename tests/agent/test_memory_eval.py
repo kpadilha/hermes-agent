@@ -48,6 +48,41 @@ def test_memory_eval_reports_failures_when_sources_missing(tmp_path):
     assert all("id" in check and "passed" in check for check in result["checks"])
 
 
+def test_memory_eval_default_kb_root_ignores_profile_home(monkeypatch, tmp_path):
+    """Profile/kanban HOME sandboxes must not move the canonical KB lookup."""
+    hermes_home = tmp_path / ".hermes"
+    memories = hermes_home / "memories"
+    memories.mkdir(parents=True)
+    (memories / "USER.md").write_text(
+        "Krishna prefers self-hosted/local-first memory. Telegram idle reset.\n",
+        encoding="utf-8",
+    )
+    (memories / "MEMORY.md").write_text(
+        "USER.md source of truth; Honcho projection. LCM active.\n",
+        encoding="utf-8",
+    )
+    canonical_kb = tmp_path / "canonical" / "kb"
+    note = canonical_kb / "wiki" / "operations" / "hermes-memory-architecture.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        "KB / Obsidian is Compiled Truth. Memory Write Gate and Belief Ledger.\n",
+        encoding="utf-8",
+    )
+    profile_home = tmp_path / "profile-home"
+    profile_home.mkdir()
+    monkeypatch.setenv("HOME", str(profile_home))
+
+    import agent.memory_eval as memory_eval
+
+    monkeypatch.setattr(memory_eval, "default_kb_root", lambda: canonical_kb, raising=False)
+
+    result = KrishnaMemoryEval(hermes_home=hermes_home).run()
+    failed = {check["id"] for check in result["checks"] if not check["passed"]}
+
+    assert "kb_compiled_truth" not in failed
+    assert "write_gate_ledger" not in failed
+
+
 def test_memory_eval_fails_on_active_ledger_conflicts(tmp_path):
     hermes_home = tmp_path / ".hermes"
     memories = hermes_home / "memories"
