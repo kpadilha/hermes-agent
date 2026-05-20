@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 from hermes_constants import get_hermes_home
+from hermes_cli.memory_paths import default_kb_root
 from agent.memory_ledger import BeliefLedger
 
 
@@ -31,7 +32,7 @@ class KrishnaMemoryEval:
 
     def __init__(self, *, hermes_home: Optional[Path] = None, kb_root: Optional[Path] = None) -> None:
         self.hermes_home = Path(hermes_home) if hermes_home else get_hermes_home()
-        self.kb_root = Path(kb_root) if kb_root else Path.home() / "obsidian-vault" / "Krishna" / "kb"
+        self.kb_root = Path(kb_root) if kb_root else default_kb_root()
 
     def checks(self) -> List[MemoryEvalCheck]:
         return [
