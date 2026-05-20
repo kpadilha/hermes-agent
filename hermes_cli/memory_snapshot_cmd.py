@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from agent.memory_ledger import BeliefLedger
+from hermes_cli.memory_paths import default_memory_snapshot_dir
 
 
 def _emit(payload: Dict[str, Any], *, as_json: bool = False) -> None:
@@ -24,7 +25,7 @@ def _metadata_wrapper_path(snapshot_path: Path) -> Path:
 
 
 def _default_snapshot_dir() -> Path:
-    return Path("~/obsidian-vault/Krishna/niko/operations/memory-snapshots").expanduser()
+    return default_memory_snapshot_dir()
 
 
 def _iso_from_epoch(epoch: float) -> str:
@@ -186,7 +187,8 @@ def memory_snapshot_command(
 
     ledger = ledger or BeliefLedger()
     sdk = _load_memvid_sdk(memvid_sdk)
-    output = Path(getattr(args, "output", "") or "memory-ledger.mv2").expanduser()
+    output_arg = getattr(args, "output", None)
+    output = Path(output_arg).expanduser() if output_arg else _default_snapshot_dir() / "memory-ledger.mv2"
     output.parent.mkdir(parents=True, exist_ok=True)
     records = ledger.list_records()
     created_at = datetime.now(timezone.utc).isoformat()
