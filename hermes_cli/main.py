@@ -3259,6 +3259,9 @@ def _build_cli_parser():
     build_curator_parser(subparsers)
     build_pets_parser(subparsers)
     build_clipboard_parser(subparsers)
+    from hermes_cli.local_proof_ops.cli import register_proof_parser
+
+    register_proof_parser(subparsers)
     build_journey_parser(subparsers)
     build_memory_parser(subparsers, cmd_memory=cmd_memory)
     build_tools_parser(subparsers, cmd_tools=cmd_tools)
