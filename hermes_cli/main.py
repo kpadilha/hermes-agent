@@ -12748,8 +12748,43 @@ def main():
     except Exception as _exc:
         logging.getLogger(__name__).debug("pets CLI wiring failed: %s", _exc)
 
+    # proof command
     # =========================================================================
-    # memory command  (parser built in hermes_cli/subcommands/memory.py)
+    proof_parser = subparsers.add_parser(
+        "proof",
+        help="Create durable task/LCM proof artifacts",
+    )
+    proof_sub = proof_parser.add_subparsers(dest="proof_command")
+    proof_create = proof_sub.add_parser(
+        "create",
+        help="Create a task proof artifact under the operational proofs directory",
+    )
+    proof_create.add_argument("--title", required=True)
+    proof_create.add_argument("--status", default="recorded")
+    proof_create.add_argument("--rationale", default="")
+    proof_create.add_argument("--input", dest="inputs", action="append", default=[])
+    proof_create.add_argument("--file", dest="files", action="append", default=[])
+    proof_create.add_argument("--command", dest="commands", action="append", default=[])
+    proof_create.add_argument("--validation", dest="validations", action="append", default=[])
+    proof_create.add_argument("--kb-promotion", dest="kb_promotions", action="append", default=[])
+    proof_create.add_argument("--final-state", default="")
+    proof_create.add_argument("--lcm-ref", dest="lcm_refs", action="append", default=[])
+    proof_create.add_argument("--output-dir", default="")
+    proof_create.add_argument("--json", action="store_true")
+
+    def cmd_proof(args):
+        sub = getattr(args, "proof_command", None)
+        if sub == "create":
+            from hermes_cli.proof_trail_cmd import proof_trail_command
+
+            proof_trail_command(args)
+            return
+        proof_parser.print_help()
+
+    proof_parser.set_defaults(func=cmd_proof)
+
+    # =========================================================================
+    # memory command
     # =========================================================================
     build_memory_parser(subparsers, cmd_memory=cmd_memory)
 
