@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import struct
 import subprocess
 import tempfile
@@ -30,6 +31,36 @@ _DISCORD_COMMAND_SYNC_STATE_SUBDIR = "gateway"
 _DISCORD_COMMAND_SYNC_STATE_FILENAME = "discord_command_sync_state.json"
 _DISCORD_COMMAND_SYNC_MUTATION_INTERVAL_SECONDS = 4.5
 _DISCORD_COMMAND_SYNC_MAX_RATE_LIMIT_SLEEP_SECONDS = 30.0
+_DISCORD_THREAD_TITLE_MAX_LENGTH = 80
+_DISCORD_THREAD_TITLE_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_DISCORD_THREAD_TITLE_MENTION_RE = re.compile(r"<@!?\d+>|<@&\d+>|<#\d+>")
+_DISCORD_THREAD_TITLE_CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
+_DISCORD_THREAD_TITLE_WS_RE = re.compile(r"\s+")
+_DISCORD_THREAD_TITLE_EDGE_RE = re.compile(r"^[\s\-–—:;,.!?]+|[\s\-–—:;,.!?]+$")
+_DISCORD_THREAD_TITLE_TRAILING_TRUNCATION_RE = re.compile(r"(?:\s*(?:\.{2,}|…|⋯|‥)\s*)+$")
+_DISCORD_GENERIC_THREAD_TITLES = {
+    "thread",
+    "new thread",
+    "nova thread",
+    "untitled",
+    "sem titulo",
+    "sem título",
+    "discussion",
+    "discussao",
+    "discussão",
+    "topic",
+    "topico",
+    "tópico",
+}
+_DISCORD_GENERIC_THREAD_PREFIXES = (
+    "new thread",
+    "nova thread",
+    "thread-",
+    "thread ",
+    "untitled",
+    "sem titulo",
+    "sem título",
+)
 
 try:
     import discord
@@ -48,7 +79,6 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
-import re
 
 from gateway.platforms.helpers import MessageDeduplicator, ThreadParticipationTracker
 from utils import atomic_json_write
@@ -103,6 +133,105 @@ def _clean_discord_id(entry: str) -> str:
     if entry.lower().startswith("user:"):
         entry = entry[5:]
     return entry.strip()
+
+
+def _discord_clean_thread_title_text(text: str) -> str:
+    """Return title-safe Discord text without mentions, URLs, or markup noise."""
+    text = _DISCORD_THREAD_TITLE_URL_RE.sub("", text or "")
+    text = _DISCORD_THREAD_TITLE_MENTION_RE.sub("", text)
+    text = _DISCORD_THREAD_TITLE_CUSTOM_EMOJI_RE.sub("", text)
+    text = text.replace("`", " ").replace("*", " ").replace("_", " ")
+    text = _DISCORD_THREAD_TITLE_WS_RE.sub(" ", text).strip()
+    text = _DISCORD_THREAD_TITLE_TRAILING_TRUNCATION_RE.sub("", text).strip()
+    return _DISCORD_THREAD_TITLE_EDGE_RE.sub("", text)
+
+
+def _discord_truncate_thread_title(title: str, max_length: int = _DISCORD_THREAD_TITLE_MAX_LENGTH) -> str:
+    title = _discord_clean_thread_title_text(title)
+    if len(title) <= max_length:
+        return title
+    cut = title[: max_length + 1]
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return _DISCORD_THREAD_TITLE_EDGE_RE.sub("", cut[:max_length])
+
+
+def _discord_thread_title_looks_auto_generated(name: str) -> tuple[bool, str]:
+    """Classify thread names that are safe for Hermes to auto-improve."""
+    raw = name or ""
+    raw_stripped = raw.strip()
+    clean = _discord_clean_thread_title_text(raw)
+    lowered = clean.lower()
+    if not clean:
+        return True, "empty"
+    if _DISCORD_THREAD_TITLE_TRAILING_TRUNCATION_RE.search(raw_stripped):
+        return True, "truncated"
+    if lowered in _DISCORD_GENERIC_THREAD_TITLES:
+        return True, "generic"
+    if any(lowered.startswith(prefix) for prefix in _DISCORD_GENERIC_THREAD_PREFIXES):
+        return True, "generic_prefix"
+    if _DISCORD_THREAD_TITLE_URL_RE.search(raw):
+        return True, "contains_url"
+    if len(clean) >= _DISCORD_THREAD_TITLE_MAX_LENGTH:
+        return True, "too_long"
+    if len(re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", clean)) < 3:
+        return True, "too_few_words"
+    return False, "specific_enough"
+
+
+def _discord_sentence_candidate(text: str) -> str:
+    text = _discord_clean_thread_title_text(text)
+    if not text:
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+|\s+[—–-]\s+|\s*;\s*", text)
+    for part in parts:
+        part = _discord_clean_thread_title_text(part)
+        if len(re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", part)) >= 3:
+            return part
+    return text
+
+
+def _discord_normalize_thread_title(text: str) -> str:
+    text = _discord_clean_thread_title_text(text)
+    lowered = text.lower()
+    replacements = [
+        ("uma coisa interessante de automatizar", "Automatizar"),
+        ("será que dá para", ""),
+        ("sera que da para", ""),
+        ("será que", "Avaliar se"),
+        ("sera que", "Avaliar se"),
+        ("podemos melhorar", "Melhorar"),
+        ("podemos criar", "Criar"),
+        ("vc acha", "Avaliar"),
+        ("você acha", "Avaliar"),
+        ("eu vi que o", ""),
+        ("eu vi que a", ""),
+        ("eu vi que", ""),
+        ("vamos ", ""),
+    ]
+    for old, new in replacements:
+        if lowered.startswith(old):
+            text = new + text[len(old):]
+            break
+    text = _DISCORD_THREAD_TITLE_EDGE_RE.sub("", text)
+    if text and text[0].islower():
+        text = text[0].upper() + text[1:]
+    return text
+
+
+def _discord_thread_title_from_messages(
+    messages: list[str],
+    max_length: int = _DISCORD_THREAD_TITLE_MAX_LENGTH,
+) -> Optional[str]:
+    """Derive a concise deterministic thread title from early message text."""
+    texts = [_discord_clean_thread_title_text(str(m)) for m in messages if _discord_clean_thread_title_text(str(m))]
+    if not texts:
+        return None
+    candidate = _discord_sentence_candidate(texts[0])
+    if not candidate and len(texts) > 1:
+        candidate = _discord_sentence_candidate(" ".join(texts[:2]))
+    candidate = _discord_normalize_thread_title(candidate)
+    return _discord_truncate_thread_title(candidate, max_length) if candidate else None
 
 
 def check_discord_requirements() -> bool:
@@ -620,6 +749,68 @@ class DiscordAdapter(BasePlatformAdapter):
         # history backfill to skip the full scan on hot paths.  Falls back to
         # scanning channel.history() on cache miss (cold start / restart).
         self._last_self_message_id: Dict[str, str] = {}
+        self._auto_renamed_threads: set[str] = set()
+
+    def _auto_rename_threads_config(self) -> dict:
+        raw = self.config.extra.get("auto_rename_threads") if isinstance(self.config.extra, dict) else None
+        cfg = raw if isinstance(raw, dict) else {}
+        enabled_env = os.getenv("DISCORD_AUTO_RENAME_THREADS", "").strip().lower()
+        enabled = bool(cfg.get("enabled", False))
+        if enabled_env:
+            enabled = enabled_env in {"true", "1", "yes", "on"}
+        max_length = cfg.get("max_length", _DISCORD_THREAD_TITLE_MAX_LENGTH)
+        try:
+            max_length = int(max_length)
+        except (TypeError, ValueError):
+            max_length = _DISCORD_THREAD_TITLE_MAX_LENGTH
+        max_length = max(20, min(_DISCORD_THREAD_TITLE_MAX_LENGTH, max_length))
+        return {"enabled": enabled, "max_length": max_length}
+
+    async def _maybe_auto_rename_thread(self, message: Any) -> bool:
+        """Optionally rename noisy Discord thread titles using deterministic rules."""
+        cfg = self._auto_rename_threads_config()
+        if not cfg["enabled"]:
+            return False
+        channel = getattr(message, "channel", None)
+        if channel is None or not hasattr(channel, "edit") or not hasattr(channel, "name"):
+            return False
+        # Discord threads have a parent channel; normal text channels do not.
+        if getattr(channel, "parent_id", None) is None:
+            return False
+        thread_id = str(getattr(channel, "id", ""))
+        if thread_id and thread_id in self._auto_renamed_threads:
+            return False
+        current_name = str(getattr(channel, "name", "") or "")
+        should_rename, reason = _discord_thread_title_looks_auto_generated(current_name)
+        if not should_rename:
+            return False
+        title = _discord_thread_title_from_messages(
+            [current_name, str(getattr(message, "content", "") or "")],
+            max_length=cfg["max_length"],
+        )
+        if not title or title == current_name:
+            return False
+        try:
+            await channel.edit(name=title, reason="Hermes auto-renamed generic Discord thread title")
+        except Exception as exc:
+            logger.warning(
+                "[%s] Failed to auto-rename Discord thread %s: %s",
+                self.name,
+                thread_id or "unknown",
+                exc,
+            )
+            return False
+        if thread_id:
+            self._auto_renamed_threads.add(thread_id)
+        logger.info(
+            "[%s] Auto-renamed Discord thread %s from %r to %r (%s)",
+            self.name,
+            thread_id or "unknown",
+            current_name,
+            title,
+            reason,
+        )
+        return True
 
     async def connect(self) -> bool:
         """Connect to Discord and start receiving events."""
@@ -845,6 +1036,7 @@ class DiscordAdapter(BasePlatformAdapter):
                         if "*" not in _free_channels and not (_channel_ids & _free_channels):
                             return
 
+                await adapter_self._maybe_auto_rename_thread(message)
                 await self._handle_message(message)
 
             @self._client.event

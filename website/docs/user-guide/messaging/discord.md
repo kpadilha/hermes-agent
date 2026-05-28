@@ -17,7 +17,7 @@ Before setup, here's the part most people want to know: how Hermes behaves once 
 | **DMs** | Hermes responds to every message. No `@mention` needed. Each DM has its own session. |
 | **Server channels** | By default, Hermes only responds when you `@mention` it. If you post in a channel without mentioning it, Hermes ignores the message. |
 | **Free-response channels** | You can make specific channels mention-free with `DISCORD_FREE_RESPONSE_CHANNELS`, or disable mentions globally with `DISCORD_REQUIRE_MENTION=false`. Messages in these channels are answered inline — auto-threading is skipped so the channel stays a lightweight chat. |
-| **Threads** | Hermes replies in the same thread. Mention rules still apply unless that thread or its parent channel is configured as free-response. Threads stay isolated from the parent channel for session history. |
+| **Threads** | Hermes replies in the same thread. Mention rules still apply unless that thread or its parent channel is configured as free-response. Threads stay isolated from the parent channel for session history. Optional thread auto-rename can clean up generic/truncated thread names. |
 | **Shared channels with multiple users** | By default, Hermes isolates session history per user inside the channel for safety and clarity. Two people talking in the same channel do not share one transcript unless you explicitly disable that. |
 | **Messages mentioning other users** | When `DISCORD_IGNORE_NO_MENTION` is `true` (the default), Hermes stays silent if a message @mentions other users but does **not** mention the bot. This prevents the bot from jumping into conversations directed at other people. Set to `false` if you want the bot to respond to all messages regardless of who is mentioned. This only applies in server channels, not DMs. |
 
@@ -188,6 +188,7 @@ These are the minimum permissions your bot needs:
 ### Recommended Additional Permissions
 
 - **Send Messages in Threads** — respond in thread conversations
+- **Manage Threads** — optional; needed only if you enable automatic thread renaming
 - **Add Reactions** — react to messages for acknowledgment
 
 ### Permission Integers
@@ -281,6 +282,7 @@ Discord behavior is controlled through two files: **`~/.hermes/.env`** for crede
 | `DISCORD_FREE_RESPONSE_CHANNELS` | No | — | Comma-separated channel IDs where the bot responds without requiring an `@mention`, even when `DISCORD_REQUIRE_MENTION` is `true`. |
 | `DISCORD_IGNORE_NO_MENTION` | No | `true` | When `true`, the bot stays silent if a message `@mentions` other users but does **not** mention the bot. Prevents the bot from jumping into conversations directed at other people. Only applies in server channels, not DMs. |
 | `DISCORD_AUTO_THREAD` | No | `true` | When `true`, automatically creates a new thread for every `@mention` in a text channel, so each conversation is isolated (similar to Slack behavior). Messages already inside threads or DMs are unaffected. |
+| `DISCORD_AUTO_RENAME_THREADS` | No | `false` | When `true`, Hermes renames generic, truncated, or noisy Discord thread titles using deterministic rules. Requires permission to manage/edit threads. |
 | `DISCORD_ALLOW_BOTS` | No | `"none"` | Controls how the bot handles messages from other Discord bots. `"none"` — ignore all other bots. `"mentions"` — only accept bot messages that `@mention` Hermes. `"all"` — accept all bot messages. |
 | `DISCORD_REACTIONS` | No | `true` | When `true`, the bot adds emoji reactions to messages during processing (👀 when starting, ✅ on success, ❌ on error). Set to `false` to disable reactions entirely. |
 | `DISCORD_IGNORED_CHANNELS` | No | — | Comma-separated channel IDs where the bot **never** responds, even when `@mentioned`. Takes priority over all other channel settings. |
@@ -310,6 +312,9 @@ discord:
   thread_require_mention: false   # If true, require @mention in threads too (multi-bot threads)
   free_response_channels: ""      # Comma-separated channel IDs (or YAML list)
   auto_thread: true               # Auto-create threads on @mention
+  auto_rename_threads:            # Optional: clean up generic/truncated thread names
+    enabled: false                # Also configurable via DISCORD_AUTO_RENAME_THREADS=true
+    max_length: 80                # Discord-compatible title cap
   reactions: true                 # Add emoji reactions during processing
   ignored_channels: []            # Channel IDs where bot never responds
   no_thread_channels: []          # Channel IDs where bot responds without threading
@@ -375,6 +380,23 @@ Free-response channels also **skip auto-threading** — the bot replies inline r
 When enabled, every `@mention` in a regular text channel automatically creates a new thread for the conversation. This keeps the main channel clean and gives each conversation its own isolated session history. Once a thread is created, subsequent messages in that thread don't require `@mention` — the bot knows it's already participating. Set [`thread_require_mention`](#discordthread_require_mention) to `true` to disable this in-thread shortcut for multi-bot setups.
 
 Messages sent in existing threads or DMs are unaffected by this setting. Channels listed in `discord.free_response_channels` or `discord.no_thread_channels` also bypass auto-threading and get inline replies instead.
+
+#### `discord.auto_rename_threads`
+
+**Type:** object — **Default:** disabled
+
+When enabled, Hermes watches messages in Discord threads and renames thread titles that look generic, truncated, URL-heavy, or copied from a long first message. Human-specific titles are left unchanged. This first pass uses deterministic sanitization and title heuristics only — no model call is required.
+
+The bot needs permission to edit/manage threads in channels where this is used. Permission failures are logged as warnings and do not interrupt normal message handling.
+
+```yaml
+discord:
+  auto_rename_threads:
+    enabled: true
+    max_length: 80
+```
+
+You can also enable the feature with `DISCORD_AUTO_RENAME_THREADS=true`.
 
 #### `discord.reactions`
 
