@@ -88,6 +88,31 @@ def test_select_relevant_context_pins_skips_context_summaries_and_caps_output():
     assert sum(len(pin.excerpt) for pin in tiny) <= 5
 
 
+def test_compact_item_reference_selects_each_numbered_item():
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "Item 1: add lexical relevance pins."},
+        {"role": "assistant", "content": "Item 1 recorded."},
+        {"role": "user", "content": "Item 2: keep pins reference-only."},
+        {"role": "assistant", "content": "Item 2 recorded."},
+        {"role": "user", "content": "Item 3: unrelated future embeddings."},
+        {"role": "user", "content": "Latest: vamos com itens 1 e 2."},
+    ]
+
+    pins = select_relevant_context_pins(
+        messages,
+        candidate_start=1,
+        candidate_end=6,
+        max_pins=8,
+        min_score=3,
+    )
+    rendered = "\n".join(pin.excerpt for pin in pins)
+
+    assert "Item 1" in rendered
+    assert "Item 2" in rendered
+    assert "Item 3" not in rendered
+
+
 def test_select_relevant_context_pins_does_not_select_standalone_tool_result():
     messages = [
         {"role": "system", "content": "system"},
