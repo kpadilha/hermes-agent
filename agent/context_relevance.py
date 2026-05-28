@@ -116,7 +116,11 @@ def _extract_query_terms(
     exact.update(error_code_terms)
     phrases.update(term for term in error_code_terms if term.upper().startswith("HTTP"))
     phrases.update(match.group(1) for match in _QUOTED_PHRASE_RE.finditer(source))
-    phrases.update(match.group(0) for match in _ITEM_PHRASE_RE.finditer(source))
+    for match in _ITEM_PHRASE_RE.finditer(source):
+        item_phrase = match.group(0)
+        phrases.add(item_phrase)
+        for number in re.findall(r"\d+", item_phrase):
+            phrases.add(f"item {number}")
 
     words: set[str] = set()
     for token in _WORD_RE.findall(source.lower()):
@@ -185,7 +189,9 @@ def _score_message(message: dict[str, Any], terms: QueryTerms, relative_recency:
 
     phrase_hits = sum(1 for phrase in terms.phrases if phrase and phrase.lower() in lower)
     if phrase_hits:
-        score += phrase_hits * 2
+        # Compact references such as "itens 1 e 2" and quoted phrases are
+        # deliberate user handles, closer to exact matches than loose words.
+        score += phrase_hits * 3
         reasons.append("phrase")
 
     word_hits = sum(1 for word in terms.words if word and word in lower)
