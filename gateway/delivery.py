@@ -20,8 +20,8 @@ from hermes_cli.config import get_hermes_home
 
 logger = logging.getLogger(__name__)
 
-MAX_PLATFORM_OUTPUT = 4000
-TRUNCATED_VISIBLE = 3800
+MAX_PLATFORM_OUTPUT = 24000
+TRUNCATED_VISIBLE = 23600
 
 # Matches strings that are *only* a "silence" narration with optional markdown
 # wrappers. Covers: *(silent)*, _silent_, `silent`, ~silent~, (silent), silent,
