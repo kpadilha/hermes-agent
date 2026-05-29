@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 # entirely — the adapter chunks in its own send() and the full output is
 # preserved.
 MAX_PLATFORM_OUTPUT = 4000
+MAX_PLATFORM_OUTPUT = 24000
+TRUNCATED_VISIBLE = 23600
 
 # Matches strings that are *only* a "silence" narration with optional markdown
 # wrappers. Covers: *(silent)*, _silent_, `silent`, ~silent~, (silent), silent,
