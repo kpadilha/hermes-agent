@@ -9690,6 +9690,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "accepting new turns right now. It'll be back in a moment — "
                 "please resend shortly."
             )
+        _gliguard_reply = await self._run_gliguard_ingress(event, _quick_key)
+        if _gliguard_reply:
+            return _gliguard_reply
 
         # ── Claim this session before any await ───────────────────────
         # Between here and _run_agent registering the real AIAgent, there
@@ -9787,6 +9790,67 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._evict_cached_agent(quick_key)
         except Exception:
             pass
+    async def _run_gliguard_ingress(self, event: MessageEvent, session_key: str) -> Optional[str]:
+        """Run local GLiGuard ingress moderation and structured shadow logging.
+
+        The log is deliberately sanitized: it stores hashes, lengths, labels,
+        reasons, and metadata, never the raw user text or expanded context.
+        """
+        if getattr(event, "internal", False) or not (event.text or "").strip():
+            return None
+        try:
+            from gateway.gliguard import (
+                append_shadow_event,
+                build_shadow_event,
+                config_from_mapping,
+                moderate_text,
+            )
+            # ``self.config`` is a parsed ``GatewayConfig`` in production and
+            # does not preserve arbitrary nested user config such as
+            # ``security.gliguard``. Read the raw config dict for the hook;
+            # tests may still partially construct the runner with a dict.
+            source_cfg = getattr(self, "config", {})
+            if not isinstance(source_cfg, dict):
+                source_cfg = _load_gateway_config()
+            cfg = config_from_mapping(source_cfg)
+            if not cfg.enabled:
+                return None
+            result = await moderate_text(event.text or "", cfg)
+            source = event.source
+            platform_obj = getattr(source, "platform", None)
+            platform = getattr(platform_obj, "value", None) or str(platform_obj or "unknown")
+            record = build_shadow_event(
+                text=event.text or "",
+                decision=result,
+                mode=cfg.mode,
+                platform=platform,
+                chat_type=getattr(source, "chat_type", None),
+                chat_id=getattr(source, "chat_id", None),
+                user_id=getattr(source, "user_id", None),
+                message_id=getattr(event, "message_id", None),
+                session_key=session_key,
+            )
+            append_shadow_event(cfg.shadow_log_path, record)
+            if result.error:
+                logger.warning(
+                    "GLiGuard ingress moderation failed: %s mode=%s fail_open=%s",
+                    result.error,
+                    cfg.mode,
+                    cfg.fail_open,
+                )
+            elif cfg.mode == "shadow" and result.decision == "unsafe":
+                logger.info(
+                    "GLiGuard shadow would_block: platform=%s chat_type=%s reasons=%s log=%s",
+                    platform,
+                    getattr(source, "chat_type", None),
+                    ",".join(result.reasons),
+                    cfg.shadow_log_path,
+                )
+            if not result.allowed:
+                return "This message was blocked by the local safety guardrail. Rephrase or use a recovery/control command if needed."
+        except Exception as exc:
+            logger.warning("GLiGuard ingress hook failed open: %s", exc)
+        return None
 
     async def _prepare_inbound_message_text(
         self,
