@@ -2364,6 +2364,14 @@ DEFAULT_CONFIG = {
         # for restricted networks, audited environments, or air-gapped
         # systems where any runtime install is unacceptable.
         "allow_lazy_installs": True,
+        "gliguard": {
+            "enabled": False,
+            "mode": "shadow",
+            "url": "http://127.0.0.1:8766/moderate",
+            "timeout_ms": 500,
+            "fail_open": True,
+            "shadow_log_path": "",
+        },
     },
 
     "cron": {
