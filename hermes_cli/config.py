@@ -620,6 +620,36 @@ from hermes_cli.config_version_stamp import (  # noqa: E402,F401
 
 # Env vars introduced per config version; migration only mentions vars new since the user's
 # previous version.
+def _ensure_hermes_home_managed(home: Path):
+    """Managed-mode variant: verify dirs exist (activation creates them), seed SOUL.md."""
+    if not home.is_dir():
+        raise RuntimeError(
+            f"HERMES_HOME {home} does not exist."
+        )
+    for subdir in ("cron", "sessions", "logs", "memories"):
+        d = home / subdir
+        if not d.is_dir():
+            raise RuntimeError(f"{d} does not exist.")
+    # Curator reports dir is a sub-path of logs/; create it if missing.
+    # In managed mode the activation script may not know about this subdir,
+    # so we mkdir it ourselves (it's inside an already-secured logs/ dir).
+    (home / "logs" / "curator").mkdir(parents=True, exist_ok=True)
+    # Inside umask(0o007) scope — SOUL.md will be created as 0660
+    _ensure_default_soul_md(home)
+
+
+# =============================================================================
+# Config loading/saving
+# =============================================================================
+
+from hermes_cli.config_defaults import DEFAULT_CONFIG, OPTIONAL_ENV_VARS  # noqa: F401
+
+# =============================================================================
+# Config Migration System
+# =============================================================================
+
+# Track which env vars were introduced in each config version.
+# Migration only mentions vars new since the user's previous version.
 ENV_VARS_BY_VERSION: Dict[int, List[str]] = {
     3: ["FIRECRAWL_API_KEY", "BROWSERBASE_API_KEY", "BROWSERBASE_PROJECT_ID", "FAL_KEY"],
     4: ["VOICE_TOOLS_OPENAI_KEY", "ELEVENLABS_API_KEY"],
