@@ -236,7 +236,7 @@ class ResponsesApiTransport(ProviderTransport):
                 kwargs["extra_headers"] = merged_extra_headers
 
         max_tokens = params.get("max_tokens")
-        if max_tokens is not None and not is_codex_backend:
+        if max_tokens is not None:
             kwargs["max_output_tokens"] = max_tokens
 
         if is_xai_responses and session_id:
