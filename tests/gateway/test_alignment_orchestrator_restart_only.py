@@ -30,7 +30,7 @@ def run_restart_only(monkeypatch, capsys, restart_result):
     return rc, out
 
 
-def test_restart_only_deferred_is_success_not_verification_failure(monkeypatch, capsys):
+def test_restart_only_deferred_is_nonzero_corrective_action_not_done(monkeypatch, capsys):
     rc, out = run_restart_only(monkeypatch, capsys, {
         "restart_pending": True,
         "restart_deferred": True,
@@ -39,11 +39,11 @@ def test_restart_only_deferred_is_success_not_verification_failure(monkeypatch, 
         "parity_state": {"status": "degraded"},
     })
 
-    assert rc == 0
+    assert rc == 3
     assert out["status"] == "restart_only_deferred"
 
 
-def test_restart_only_scheduled_is_success_without_immediate_parity_ok(monkeypatch, capsys):
+def test_restart_only_scheduled_controlled_is_success(monkeypatch, capsys):
     rc, out = run_restart_only(monkeypatch, capsys, {
         "unit": "hermes-controlled-gateway-restart-test",
         "rc": 0,
@@ -51,7 +51,7 @@ def test_restart_only_scheduled_is_success_without_immediate_parity_ok(monkeypat
     })
 
     assert rc == 0
-    assert out["status"] == "restart_only_scheduled"
+    assert out["status"] == "restart_only_scheduled_controlled"
 
 
 def test_restart_only_scheduling_failure_is_nonzero(monkeypatch, capsys):
