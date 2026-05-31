@@ -2791,6 +2791,12 @@ class GatewayRunner:
         self._exit_reason = reason
         self._shutdown_event.set()
 
+    def _active_agent_session_keys(self) -> list[str]:
+        try:
+            return sorted(str(key) for key in self._running_agents.keys())
+        except Exception:
+            return []
+
     def _running_agent_count(self) -> int:
         return len(self._running_agents)
 
@@ -2937,6 +2943,9 @@ class GatewayRunner:
                 exit_reason=exit_reason,
                 restart_requested=self._restart_requested,
                 active_agents=self._running_agent_count(),
+                active_agent_sessions=self._active_agent_session_keys(),
+                activity_status_version=1,
+                activity_changed_at=None,
             )
         except Exception:
             pass
@@ -8408,6 +8417,7 @@ class GatewayRunner:
         # same session — corrupting the transcript.
         self._running_agents[_quick_key] = _AGENT_PENDING_SENTINEL
         self._running_agents_ts[_quick_key] = time.time()
+        self._update_runtime_status("running")
         _run_generation = self._begin_session_run_generation(_quick_key)
 
         try:
@@ -16250,6 +16260,10 @@ class GatewayRunner:
         self._running_agents_ts.pop(session_key, None)
         if hasattr(self, "_busy_ack_ts"):
             self._busy_ack_ts.pop(session_key, None)
+        try:
+            self._update_runtime_status("draining" if self._draining else "running")
+        except Exception:
+            pass
         return True
 
     def _clear_session_boundary_security_state(self, session_key: str) -> None:
@@ -18440,8 +18454,7 @@ class GatewayRunner:
                 )
                 return
             self._running_agents[session_key] = agent_holder[0]
-            if self._draining:
-                self._update_runtime_status("draining")
+            self._update_runtime_status("draining" if self._draining else "running")
         
         tracking_task = asyncio.create_task(track_agent())
         
