@@ -2950,6 +2950,26 @@ class GatewayRunner:
         except Exception:
             pass
 
+    def _record_recent_turn_lcm_state(self, result: dict | None, *, session_id: str | None = None) -> None:
+        """Persist completed-turn proof/continuity telemetry for health dashboards."""
+        if not isinstance(result, dict):
+            return
+        try:
+            from gateway.status import build_recent_turn_lcm_state, write_runtime_status
+
+            lcm_recent_turn = build_recent_turn_lcm_state(
+                completed=bool(result.get("completed", True)),
+                interrupted=bool(result.get("interrupted", False)),
+                failed=bool(result.get("failed", False)),
+                error=result.get("error"),
+                api_calls=result.get("api_calls"),
+                tools=result.get("tools") if isinstance(result.get("tools"), list) else [],
+                session_id=session_id or result.get("session_id"),
+            )
+            write_runtime_status(lcm_recent_turn=lcm_recent_turn)
+        except Exception:
+            logger.debug("Failed to write recent-turn LCM runtime status", exc_info=True)
+
     def _update_platform_runtime_status(
         self,
         platform: str,
@@ -18234,7 +18254,7 @@ class GatewayRunner:
 
             if not final_response:
                 error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
-                return {
+                no_response_result = {
                     "final_response": error_msg,
                     "messages": result.get("messages", []),
                     "api_calls": result.get("api_calls", 0),
@@ -18252,7 +18272,10 @@ class GatewayRunner:
                     "output_tokens": _output_toks,
                     "model": _resolved_model,
                     "context_length": _context_length,
+                    "session_id": getattr(_agent, 'session_id', session_id) if _agent else session_id,
                 }
+                self._record_recent_turn_lcm_state(no_response_result, session_id=no_response_result.get("session_id"))
+                return no_response_result
             
             # Scan tool results for MEDIA:<path> tags that need to be delivered
             # as native audio/file attachments.  The TTS tool embeds MEDIA: tags
@@ -18391,7 +18414,7 @@ class GatewayRunner:
                 except Exception:
                     pass
 
-            return {
+            success_result = {
                 "final_response": final_response,
                 "last_reasoning": result.get("last_reasoning"),
                 "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
@@ -18412,6 +18435,8 @@ class GatewayRunner:
                 "response_previewed": result.get("response_previewed", False),
                 "response_transformed": result.get("response_transformed", False),
             }
+            self._record_recent_turn_lcm_state(success_result, session_id=effective_session_id)
+            return success_result
         
         # Start progress message sender if enabled
         progress_task = None
