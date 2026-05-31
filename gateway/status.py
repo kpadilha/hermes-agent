@@ -550,6 +550,9 @@ def write_runtime_status(
     exit_reason: Any = _UNSET,
     restart_requested: Any = _UNSET,
     active_agents: Any = _UNSET,
+    active_agent_sessions: Any = _UNSET,
+    activity_status_version: Any = _UNSET,
+    activity_changed_at: Any = _UNSET,
     platform: Optional[str] = None,
     platform_state: Any = _UNSET,
     updated_at: Any = _UNSET,
@@ -591,6 +594,15 @@ def write_runtime_status(
         payload["restart_requested"] = bool(restart_requested)
     if active_agents is not _UNSET:
         payload["active_agents"] = max(0, int(active_agents))
+    if active_agent_sessions is not _UNSET:
+        if isinstance(active_agent_sessions, (list, tuple, set)):
+            payload["active_agent_sessions"] = [str(item) for item in active_agent_sessions]
+        else:
+            payload["active_agent_sessions"] = []
+    if activity_status_version is not _UNSET:
+        payload["activity_status_version"] = int(activity_status_version)
+    if activity_changed_at is not _UNSET:
+        payload["activity_changed_at"] = activity_changed_at or _utc_now_iso()
 
     if platform is not _UNSET and platform is not None:
         platform_payload = payload["platforms"].get(platform, {})
