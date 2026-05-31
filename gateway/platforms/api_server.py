@@ -3479,8 +3479,24 @@ class APIServerAdapter(BasePlatformAdapter):
             # (e.g. X-Hermes-Session-Id header) can track compression-
             # triggered session rotations. (#16938)
             _eff_sid = getattr(agent, "session_id", session_id)
+            effective_session_id = session_id
             if isinstance(_eff_sid, str) and _eff_sid:
                 result["session_id"] = _eff_sid
+                effective_session_id = _eff_sid
+            try:
+                from gateway.status import build_recent_turn_lcm_state, write_runtime_status
+
+                write_runtime_status(lcm_recent_turn=build_recent_turn_lcm_state(
+                    completed=bool(result.get("completed", True)),
+                    interrupted=bool(result.get("interrupted", False)),
+                    failed=bool(result.get("failed", False)),
+                    error=result.get("error"),
+                    api_calls=result.get("api_calls"),
+                    tools=result.get("tools") if isinstance(result.get("tools"), list) else [],
+                    session_id=result.get("session_id") or effective_session_id,
+                ))
+            except Exception:
+                logger.debug("Failed to write API-server recent-turn LCM status", exc_info=True)
             return result, usage
 
         return await loop.run_in_executor(None, _run)
