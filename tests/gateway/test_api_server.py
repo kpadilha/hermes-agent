@@ -14,6 +14,7 @@ Tests cover:
 
 import asyncio
 import json
+import logging
 import os
 import stat
 import time
@@ -418,6 +419,42 @@ class TestAuth:
         result = adapter._check_auth(mock_request)
         assert result is not None
         assert result.status == 401
+
+    def test_expected_local_healthcheck_unauth_probe_logs_info_not_warning(self, caplog):
+        config = PlatformConfig(enabled=True, extra={"key": "sk-test123"})
+        adapter = APIServerAdapter(config)
+        mock_request = MagicMock()
+        mock_request.headers = {"User-Agent": "curl/8.14.1", "Content-Type": "application/json"}
+        mock_request.remote = "127.0.0.1"
+        mock_request.method = "POST"
+        mock_request.path_qs = "/v1/responses"
+        mock_request.transport.get_extra_info.return_value = ("127.0.0.1", 45678)
+
+        with caplog.at_level(logging.INFO, logger="gateway.platforms.api_server"):
+            result = adapter._check_auth(mock_request)
+
+        assert result is not None
+        assert result.status == 401
+        assert "expected local unauthenticated healthcheck probe" in caplog.text
+        assert "rejected invalid API key" not in caplog.text
+        assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+
+    def test_unexpected_invalid_key_still_logs_warning(self, caplog):
+        config = PlatformConfig(enabled=True, extra={"key": "sk-test123"})
+        adapter = APIServerAdapter(config)
+        mock_request = MagicMock()
+        mock_request.headers = {"Authorization": "Bearer wrong-key", "User-Agent": "curl/8.14.1"}
+        mock_request.remote = "127.0.0.1"
+        mock_request.method = "POST"
+        mock_request.path_qs = "/v1/responses"
+        mock_request.transport.get_extra_info.return_value = ("127.0.0.1", 45678)
+
+        with caplog.at_level(logging.WARNING, logger="gateway.platforms.api_server"):
+            result = adapter._check_auth(mock_request)
+
+        assert result is not None
+        assert result.status == 401
+        assert "rejected invalid API key" in caplog.text
 
 
 # ---------------------------------------------------------------------------
