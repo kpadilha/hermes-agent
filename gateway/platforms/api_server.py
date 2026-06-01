@@ -1047,6 +1047,27 @@ class APIServerAdapter(BasePlatformAdapter):
         fields = [f"{key}={value!r}" for key, value in ctx.items() if value]
         return " ".join(fields) if fields else "source='unknown'"
 
+    def _is_expected_local_unauth_health_probe(self, request) -> bool:
+        """Return True for the legacy local healthcheck's intentional 401 probe.
+
+        ~/.hermes/scripts/healthcheck.sh deliberately posts without
+        Authorization to /v1/responses every five minutes to prove the API
+        server rejects unauthenticated OpenAI-compatible requests. That is a
+        successful hardening check, not an operator-actionable credential
+        incident. Keep all other invalid-key attempts at WARNING level.
+        """
+        ctx = self._request_audit_context(request)
+        remote = ctx.get("remote") or ctx.get("peer_ip") or ""
+        peer_ip = ctx.get("peer_ip") or ""
+        local = remote in {"127.0.0.1", "::1", "localhost"} or peer_ip in {"127.0.0.1", "::1"}
+        return (
+            local
+            and ctx.get("method") == "POST"
+            and str(ctx.get("path") or "").startswith("/v1/responses")
+            and str(ctx.get("user_agent") or "").startswith("curl/")
+            and not request.headers.get("Authorization")
+        )
+
     def _cron_origin_from_request(self, request: "web.Request") -> Dict[str, str]:
         """Persist safe API source metadata on cron jobs created over HTTP."""
         ctx = self._request_audit_context(request)
@@ -1087,10 +1108,17 @@ class APIServerAdapter(BasePlatformAdapter):
             if hmac.compare_digest(token, self._api_key):
                 return None  # Auth OK
 
-        logger.warning(
-            "API server rejected invalid API key: %s",
-            self._request_audit_log_suffix(request),
-        )
+        log_suffix = self._request_audit_log_suffix(request)
+        if self._is_expected_local_unauth_health_probe(request):
+            logger.info(
+                "API server rejected expected local unauthenticated healthcheck probe: %s",
+                log_suffix,
+            )
+        else:
+            logger.warning(
+                "API server rejected invalid API key: %s",
+                log_suffix,
+            )
         return web.json_response(
             {"error": {"message": "Invalid API key", "type": "invalid_request_error", "code": "invalid_api_key"}},
             status=401,
