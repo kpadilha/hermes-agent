@@ -4086,6 +4086,47 @@ class TestSendMediaTimeoutCancelsFuture:
         assert adapter.send_video.call_args[1]["video_path"] == str(fast.resolve())
 
 
+    def test_standalone_thread_fallback_shutdown_race_returns_delivery_error(self):
+        """If asyncio.run() cannot be used and the thread fallback cannot submit
+        because the interpreter is shutting down, _deliver_result should return
+        a delivery error string instead of raising out of the delivery path.
+        """
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.DISCORD: pconfig}
+
+        async def fake_send(*_args, **_kwargs):
+            return {"success": True}
+
+        class ShutdownExecutor:
+            def __init__(self, *args, **kwargs):
+                pass
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def submit(self, *_args, **_kwargs):
+                raise RuntimeError("cannot schedule new futures after interpreter shutdown")
+
+        job = {
+            "id": "shutdown-delivery-job",
+            "deliver": "discord:123:456",
+        }
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("asyncio.run", side_effect=RuntimeError("asyncio.run() cannot be called from a running event loop")), \
+             patch("concurrent.futures.ThreadPoolExecutor", ShutdownExecutor), \
+             patch("tools.send_message_tool._send_to_platform", new=fake_send):
+            result = _deliver_result(job, "Hello during shutdown")
+
+        assert result is not None
+        assert "cannot schedule new futures after interpreter shutdown" in result
+
+
 class TestCronDeliveryTargets:
     """``cron_delivery_targets`` powers the dashboard delivery dropdown.
 
