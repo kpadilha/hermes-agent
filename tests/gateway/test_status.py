@@ -701,6 +701,52 @@ class TestGatewayRuntimeStatus:
         assert payload["lcm_memory"] == memory
         assert payload["lcm_gateway"] == lcm_gateway
 
+    def test_build_recent_turn_lcm_state_records_completed_turn_success(self):
+        lcm_recent_turn = status.build_recent_turn_lcm_state(
+            completed=True,
+            interrupted=False,
+            failed=False,
+            api_calls=2,
+            tools=[{"name": "read_file"}],
+            session_id="session-1",
+        )
+
+        scorecard = lcm_recent_turn["scorecard"]
+        assert scorecard["continuity_health"] == "ok"
+        assert scorecard["workflows"]["gateway_turn_completion"]["success"] == 1
+        event = lcm_recent_turn["recent_workflow_events"][-1]
+        assert event["outcome"] == "success"
+        assert event["details"]["api_calls"] == 2
+        assert event["details"]["tool_count"] == 1
+        assert event["details"]["session_id"] == "session-1"
+
+    def test_build_recent_turn_lcm_state_degrades_failed_turn(self):
+        lcm_recent_turn = status.build_recent_turn_lcm_state(
+            completed=False,
+            interrupted=True,
+            failed=True,
+            error="timeout",
+            session_id="session-2",
+        )
+
+        scorecard = lcm_recent_turn["scorecard"]
+        assert scorecard["continuity_health"] == "degraded"
+        assert scorecard["workflows"]["gateway_turn_completion"]["failure"] == 1
+        event = lcm_recent_turn["recent_workflow_events"][-1]
+        assert event["outcome"] == "failure"
+        assert event["failure_class"] == "interrupted"
+        assert event["details"]["error"] == "timeout"
+
+    def test_write_runtime_status_persists_built_recent_turn_lcm_state(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        recent_turn = status.build_recent_turn_lcm_state(session_id="session-3")
+        status.write_runtime_status(gateway_state="running", lcm_recent_turn=recent_turn)
+
+        payload = status.read_runtime_status()
+        assert payload["lcm_recent_turn"]["scorecard"]["continuity_health"] == "ok"
+        assert "gateway_turn_completion" in payload["lcm_recent_turn"]["scorecard"]["workflows"]
+
     def test_write_runtime_status_does_not_hijack_gateway_pid_from_cli_health_process(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         state_path = tmp_path / "gateway_state.json"
