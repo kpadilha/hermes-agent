@@ -785,12 +785,73 @@ def write_pid_file() -> None:
         raise
 
 
+def build_recent_turn_lcm_state(
+    *,
+    completed: bool = True,
+    interrupted: bool = False,
+    failed: bool = False,
+    error: str | None = None,
+    api_calls: int | None = None,
+    tools: list[Any] | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a compact completed-turn continuity/proof scorecard.
+
+    This is emitted after a gateway turn returns.  It deliberately represents
+    completed-turn telemetry; in-flight turns should not be expected to have it
+    yet.
+    """
+    ok = bool(completed) and not bool(interrupted) and not bool(failed) and not error
+    workflow = "gateway_turn_completion"
+    success = 1 if ok else 0
+    failure = 0 if ok else 1
+    event = {
+        "workflow": workflow,
+        "outcome": "success" if ok else "failure",
+        "failure_class": None if ok else ("interrupted" if interrupted else "turn_failed"),
+        "details": {
+            "completed": bool(completed),
+            "interrupted": bool(interrupted),
+            "failed": bool(failed),
+            "error": str(error or "")[:500],
+            "api_calls": int(api_calls or 0),
+            "tool_count": len(tools or []),
+            "session_id": str(session_id or ""),
+        },
+        "recorded_at": _utc_now_iso(),
+    }
+    return {
+        "workflow_counters": {workflow: {"success": success, "failure": failure}},
+        "recent_workflow_events": [event],
+        "scorecard": {
+            "overall": {
+                "success": success,
+                "failure": failure,
+                "total": success + failure,
+                "success_rate_pct": 100.0 if ok else 0.0,
+            },
+            "workflows": {
+                workflow: {
+                    "success": success,
+                    "failure": failure,
+                    "total": success + failure,
+                    "success_rate_pct": 100.0 if ok else 0.0,
+                }
+            },
+            "continuity_health": "ok" if ok else "degraded",
+        },
+    }
+
+
 def write_runtime_status(
     *,
     gateway_state: Any = _UNSET,
     exit_reason: Any = _UNSET,
     restart_requested: Any = _UNSET,
     active_agents: Any = _UNSET,
+    active_agent_sessions: Any = _UNSET,
+    activity_status_version: Any = _UNSET,
+    activity_changed_at: Any = _UNSET,
     platform: Optional[str] = None,
     platform_state: Any = _UNSET,
     updated_at: Any = _UNSET,
@@ -838,6 +899,15 @@ def write_runtime_status(
         # for a single-profile gateway. Lets `hermes status` show per-profile
         # coverage without a second probe.
         payload["served_profiles"] = list(served_profiles or [])
+    if active_agent_sessions is not _UNSET:
+        if isinstance(active_agent_sessions, (list, tuple, set)):
+            payload["active_agent_sessions"] = [str(item) for item in active_agent_sessions]
+        else:
+            payload["active_agent_sessions"] = []
+    if activity_status_version is not _UNSET:
+        payload["activity_status_version"] = int(activity_status_version)
+    if activity_changed_at is not _UNSET:
+        payload["activity_changed_at"] = activity_changed_at or _utc_now_iso()
 
     if platform is not _UNSET and platform is not None:
         platform_payload = payload["platforms"].get(platform, {})
