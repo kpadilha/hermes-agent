@@ -153,7 +153,14 @@ def test_build_architecture_dashboard_integrates_memory_and_recent_turn_scorecar
     assert dashboard["overall"]["status"] == "ok"
 
 
-def test_build_architecture_dashboard_marks_lcm_proves_unknown_when_required_proof_is_missing():
+def test_build_architecture_dashboard_does_not_require_recent_turn_proof_mid_turn():
+    """An active in-flight gateway turn is not missing completed-turn proof.
+
+    The dashboard used to mark global health unknown whenever active_agents > 0
+    and lcm_recent_turn was absent. That made every live conversation degrade the
+    architecture dashboard before the turn had a chance to complete and emit a
+    recent-turn scorecard.
+    """
     dashboard = gateway._build_architecture_dashboard(
         runtime_state={
             "active_agents": 1,
@@ -186,8 +193,8 @@ def test_build_architecture_dashboard_marks_lcm_proves_unknown_when_required_pro
 
     assert dashboard["hermes_acts"]["status"] == "ok"
     assert dashboard["honcho_remembers"]["status"] == "ok"
-    assert dashboard["lcm_proves"]["status"] == "unknown"
-    assert dashboard["overall"]["status"] == "unknown"
+    assert dashboard["lcm_proves"]["status"] == "ok"
+    assert dashboard["overall"]["status"] == "ok"
 
 
 def test_build_architecture_dashboard_ignores_runtime_health_without_matching_workflow():
