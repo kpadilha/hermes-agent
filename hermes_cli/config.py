@@ -1584,6 +1584,12 @@ DEFAULT_CONFIG = {
                                       # failure-cooldown / anti-thrash / per-session
                                       # lock guards as every automatic compaction.
                                       # Example: 1800 = compact after 30 min idle.
+        "relevance_pinning": {       # Optional lexical MVP: select reference-only
+            "enabled": False,        # older middle-window excerpts for the summarizer.
+            "max_pins": 8,
+            "max_pin_chars_total": 12000,
+            "min_score": 3,
+        },
     },
 
     # Anthropic prompt caching (Claude via OpenRouter or native Anthropic API).
