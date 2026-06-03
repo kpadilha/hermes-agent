@@ -2201,6 +2201,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 gateway_running=True, gateway_state=gw_state, active_agents=gw_active),
             "gateway_drainable": derive_gateway_drainable(
                 gateway_running=True, gateway_state=gw_state),
+            "active_agent_sessions": runtime.get("active_agent_sessions", []),
+            "activity_status_version": runtime.get("activity_status_version"),
+            "activity_changed_at": runtime.get("activity_changed_at"),
             "exit_reason": runtime.get("exit_reason"),
             # Contract: RFC3339 string | null, never a number (legacy epoch floats exist).
             "updated_at": normalize_updated_at(runtime.get("updated_at")), "pid": os.getpid()})
@@ -3617,6 +3620,20 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             if isinstance(result, dict):
                 result["runtime"] = runtime
             usage["runtime"] = runtime
+        try:
+            from gateway.status import build_recent_turn_lcm_state, write_runtime_status
+
+            write_runtime_status(lcm_recent_turn=build_recent_turn_lcm_state(
+                completed=bool(result.get("completed", True)),
+                interrupted=bool(result.get("interrupted", False)),
+                failed=bool(result.get("failed", False)),
+                error=result.get("error"),
+                api_calls=result.get("api_calls"),
+                tools=result.get("tools") if isinstance(result.get("tools"), list) else [],
+                session_id=result.get("session_id") or _eff_sid or session_id,
+            ))
+        except Exception:
+            logger.debug("Failed to write API-server recent-turn LCM status", exc_info=True)
         return result, usage
 
     async def _run_agent(

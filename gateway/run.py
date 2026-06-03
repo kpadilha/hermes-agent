@@ -3829,6 +3829,12 @@ class GatewayRunner(
     def _running_agent_count(self) -> int:
         return len(self._running_agents)
 
+    def _active_agent_session_keys(self) -> list[str]:
+        try:
+            return sorted(str(key) for key in self._running_agents)
+        except Exception:
+            return []
+
     def _status_action_label(self) -> str:
         return "restart" if self._restart_requested else "shutdown"
 
@@ -3838,13 +3844,37 @@ class GatewayRunner(
     def _update_runtime_status(self, gateway_state: Optional[str] = None, exit_reason: Optional[str] = None) -> None:
         _write_runtime_status_quiet(
             gateway_state=gateway_state, exit_reason=exit_reason,
-            restart_requested=self._restart_requested, active_agents=self._active_work_count())
+            restart_requested=self._restart_requested, active_agents=self._active_work_count(),
+            active_agent_sessions=self._active_agent_session_keys(), activity_status_version=1,
+            activity_changed_at=None)
 
     def _persist_active_agents(self) -> None:
         """Persist the live in-flight agent count to ``gateway_state.json`` at every turn boundary.
         Passes ONLY ``active_agents`` so the read-merge-write keeps lifecycle state (gateway_state=None
         would clobber it). Best-effort: a failed write must never disrupt a turn."""
-        _write_runtime_status_quiet(active_agents=self._active_work_count())
+        _write_runtime_status_quiet(
+            active_agents=self._active_work_count(),
+            active_agent_sessions=self._active_agent_session_keys(), activity_status_version=1,
+            activity_changed_at=None)
+
+    def _record_recent_turn_lcm_state(self, result: dict | None, *, session_id: str | None = None) -> None:
+        """Persist completed-turn proof/continuity telemetry for health dashboards."""
+        if not isinstance(result, dict):
+            return
+        try:
+            from gateway.status import build_recent_turn_lcm_state, write_runtime_status
+
+            write_runtime_status(lcm_recent_turn=build_recent_turn_lcm_state(
+                completed=bool(result.get("completed", True)),
+                interrupted=bool(result.get("interrupted", False)),
+                failed=bool(result.get("failed", False)),
+                error=result.get("error"),
+                api_calls=result.get("api_calls"),
+                tools=result.get("tools") if isinstance(result.get("tools"), list) else [],
+                session_id=session_id or result.get("session_id"),
+            ))
+        except Exception:
+            logger.debug("Failed to write recent-turn LCM runtime status", exc_info=True)
 
     def _running_agent_ids(self) -> set:
         """``id()`` of every agent mid-turn — identity-keyed so the lookup is O(1) and independent of
