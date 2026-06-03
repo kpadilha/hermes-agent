@@ -700,6 +700,32 @@ class TestResolveProviderClientUniversalModelFallback:
         mock_read_main.assert_not_called()
         assert mock_build.call_args.args[0] == "grok-4.20-multi-agent"
 
+    def test_api_key_provider_uses_own_base_url_not_primary_openai_url(self):
+        """Built-in API-key providers must not inherit a primary Codex URL."""
+        from agent.auxiliary_client import resolve_provider_client
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"OPENAI_BASE_URL": "https://chatgpt.com/backend-api/codex"},
+                clear=False,
+            ),
+            patch(
+                "hermes_cli.auth.resolve_api_key_provider_credentials",
+                return_value={
+                    "api_key": "alibaba-test-key",
+                    "base_url": "https://coding-intl.dashscope.aliyuncs.com/v1",
+                },
+            ),
+        ):
+            client, model = resolve_provider_client(
+                "alibaba-coding-plan", model="qwen3.7-max", raw_codex=True
+            )
+
+        assert client is not None
+        assert model == "qwen3.7-max"
+        assert str(client.base_url) == "https://coding-intl.dashscope.aliyuncs.com/v1/"
+
 
 class TestExpiredCodexFallback:
     """Test that expired Codex tokens don't block the auto chain."""
