@@ -685,6 +685,29 @@ def _build_runtime_status_record() -> dict[str, Any]:
     }
 
 
+def _current_process_is_gateway_runtime() -> bool:
+    """Return whether this process command can host the gateway runtime."""
+    return looks_like_gateway_runtime_command_line(
+        " ".join(shlex.quote(str(part)) for part in sys.argv)
+    )
+
+
+def _runtime_status_identity_is_live_gateway(payload: dict[str, Any]) -> bool:
+    """Return whether the stored identity still belongs to this profile's live gateway."""
+    pid = _live_pid_from_record(payload)
+    return pid is not None and _record_matches_live_gateway_pid(
+        payload, pid, expected_home=_get_process_hermes_home()
+    )
+
+
+def _get_live_gateway_identity_record() -> Optional[dict[str, Any]]:
+    """Return the live gateway identity from gateway.pid when available."""
+    record = _read_pid_record()
+    if not isinstance(record, dict):
+        return None
+    return record if _runtime_status_identity_is_live_gateway(record) else None
+
+
 def _read_json_file(path: Path, *, bare_pid_ok: bool = False) -> Optional[dict[str, Any]]:
     """JSON object at ``path``, or None when absent/empty/unreadable/invalid. ``bare_pid_ok`` also
     accepts legacy bare-integer PID files as ``{"pid": N}``."""
@@ -1028,6 +1051,8 @@ def _prepare_runtime_status_update(
     multiplex_standalone_reason: Any = _UNSET,
     ingress_url: Any = _UNSET, listener_base: Any = _UNSET, clear_profile_platforms: bool = False,
     drop_profile_platforms: Optional[str] = None,
+    lcm_runtime: Any = _UNSET, lcm_recent_turn: Any = _UNSET,
+    lcm_memory: Any = _UNSET, lcm_gateway: Any = _UNSET,
     load_existing: bool = True, reload_existing: bool = False,
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     """Merge one update into the process-wide canonical status snapshot."""
@@ -1053,7 +1078,15 @@ def _prepare_runtime_status_update(
                 if not isinstance(k, str) or ":" not in k
                 or (drop_prefix is not None and not k.startswith(drop_prefix))
             }
-        payload.update({key: current_record[key] for key in ("kind", "pid", "argv", "start_time")})
+        payload.setdefault("kind", _GATEWAY_KIND)
+        if _current_process_is_gateway_runtime():
+            payload.update({key: current_record[key] for key in ("pid", "argv", "start_time")})
+        elif not _runtime_status_identity_is_live_gateway(payload):
+            live_record = _get_live_gateway_identity_record()
+            if live_record:
+                payload.update({key: live_record.get(key) for key in ("pid", "argv", "start_time")})
+            elif not payload.get("pid"):
+                payload.update({key: current_record[key] for key in ("pid", "argv", "start_time")})
         payload["updated_at"] = _utc_now_iso()
         payload.update(_get_code_identity_fields())
         _apply_set_fields(payload, (
@@ -1084,6 +1117,12 @@ def _prepare_runtime_status_update(
                 updated_at=_utc_now_iso(), writer_pid=current_record["pid"],
                 writer_start_time=current_record["start_time"])
             payload["platforms"][platform] = platform_payload
+        _apply_set_fields(payload, (
+            ("lcm_runtime", lcm_runtime, None),
+            ("lcm_recent_turn", lcm_recent_turn, None),
+            ("lcm_memory", lcm_memory, None),
+            ("lcm_gateway", lcm_gateway, None),
+        ))
         _runtime_status_state = payload
         return path, payload, previous_payload
 
