@@ -363,9 +363,14 @@ class TestAgentExecution:
         mock_agent.session_prompt_tokens = 1
         mock_agent.session_completion_tokens = 2
         mock_agent.session_total_tokens = 3
+        mock_agent.session_id = None
+        mock_agent._last_compaction_in_place = False
 
         model_options = {"reasoning": {"enabled": False}, "fast": False}
-        with patch.object(adapter, "_create_agent", return_value=mock_agent) as mock_create_agent:
+        with (
+            patch.object(adapter, "_create_agent", return_value=mock_agent) as mock_create_agent,
+            patch("gateway.status.write_runtime_status") as mock_write,
+        ):
             result, usage = await adapter._run_agent(
                 user_message="hello",
                 conversation_history=[],
@@ -386,6 +391,10 @@ class TestAgentExecution:
         assert create_kwargs["requested_model"] == "MiniMax-M3"
         assert create_kwargs["requested_provider"] == "minimax"
         assert create_kwargs["model_options"] == model_options
+        mock_write.assert_called_once()
+        lcm_recent_turn = mock_write.call_args.kwargs["lcm_recent_turn"]
+        assert lcm_recent_turn["scorecard"]["continuity_health"] == "ok"
+        assert lcm_recent_turn["recent_workflow_events"][-1]["details"]["session_id"] == "session-123"
         mock_agent.run_conversation.assert_called_once_with(
             user_message="hello",
             conversation_history=[],
