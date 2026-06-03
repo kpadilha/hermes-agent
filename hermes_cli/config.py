@@ -1287,6 +1287,12 @@ DEFAULT_CONFIG = {
                                       # exact route is affected — gpt-5.5 on OpenAI's
                                       # direct API, OpenRouter, and Copilot keep the
                                       # global threshold regardless.
+        "relevance_pinning": {       # Optional lexical MVP: select reference-only
+            "enabled": False,        # older middle-window excerpts for the summarizer.
+            "max_pins": 8,
+            "max_pin_chars_total": 12000,
+            "min_score": 3,
+        },
     },
 
     # Kanban subsystem (orchestrator workers + dispatcher-driven child tasks).
