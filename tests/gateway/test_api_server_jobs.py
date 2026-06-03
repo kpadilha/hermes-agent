@@ -55,6 +55,7 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app["api_server_adapter"] = adapter
     # Register only job routes (plus health for sanity)
     app.router.add_get("/health", adapter._handle_health)
+    app.router.add_get("/health/detailed", adapter._handle_health_detailed)
     app.router.add_get("/api/jobs", adapter._handle_list_jobs)
     app.router.add_post("/api/jobs", adapter._handle_create_job)
     app.router.add_get("/api/jobs/{job_id}", adapter._handle_get_job)
@@ -799,3 +800,32 @@ class TestCronPromptScanParity:
                 })
                 assert resp.status == 200
                 mock_update.assert_called_once()
+
+
+# Health detailed runtime activity telemetry
+# ---------------------------------------------------------------------------
+
+class TestHealthDetailed:
+    @pytest.mark.asyncio
+    async def test_health_detailed_exposes_activity_telemetry(self, adapter):
+        app = _create_app(adapter)
+        runtime = {
+            "gateway_state": "running",
+            "platforms": {},
+            "active_agents": 1,
+            "active_agent_sessions": ["discord:thread:user"],
+            "activity_status_version": 1,
+            "activity_changed_at": "2026-05-31T14:21:26Z",
+            "exit_reason": None,
+            "updated_at": "2026-05-31T14:21:27Z",
+        }
+        async with TestClient(TestServer(app)) as cli:
+            with patch("gateway.status.read_runtime_status", return_value=runtime):
+                resp = await cli.get("/health/detailed")
+                assert resp.status == 200
+                data = await resp.json()
+        assert data["active_agents"] == 1
+        assert data["active_agent_sessions"] == ["discord:thread:user"]
+        assert data["activity_status_version"] == 1
+        assert data["activity_changed_at"] == "2026-05-31T14:21:26Z"
+
