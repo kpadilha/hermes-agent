@@ -145,6 +145,62 @@ class TestFallbackChainAdvancement:
             assert agent._try_activate_fallback() is True
             assert mock_rpc.call_args.kwargs["explicit_api_key"] == "env-secret"
 
+    def test_anthropic_host_custom_provider_uses_anthropic_messages(self):
+        """A custom provider on the native api.anthropic.com host (no
+        "/anthropic" path suffix, name != "anthropic") must resolve to the
+        anthropic_messages wire protocol — not default to chat_completions,
+        which POSTs /v1/chat/completions and 404s. Mirrors the primary-path
+        determine_api_mode() host check."""
+        fbs = [
+            {
+                "provider": "cron-anthropic",
+                "model": "claude-sonnet-4-6",
+                "base_url": "https://api.anthropic.com",
+                "key_env": "MY_FALLBACK_KEY",
+            }
+        ]
+        agent = _make_agent(fallback_model=fbs)
+        with (
+            patch.dict("os.environ", {"MY_FALLBACK_KEY": "env-secret"}, clear=False),
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(
+                    _mock_client(base_url="https://api.anthropic.com"),
+                    "claude-sonnet-4-6",
+                ),
+            ),
+            patch("hermes_cli.model_normalize.normalize_model_for_provider", side_effect=lambda m, p: m),
+        ):
+            assert agent._try_activate_fallback() is True
+            assert agent.api_mode == "anthropic_messages"
+    def test_named_fallback_without_base_url_does_not_inherit_primary_url(self):
+        """A built-in provider fallback must resolve its own endpoint.
+
+        Regression guard for a production failure where alibaba-coding-plan
+        was activated after openai-codex but attempted qwen3.7-max against
+        https://chatgpt.com/backend-api/codex, producing deterministic 404s.
+        """
+        fbs = [{"provider": "alibaba-coding-plan", "model": "qwen3.7-max"}]
+        agent = _make_agent(fallback_model=fbs)
+        setattr(agent, "provider", "openai-codex")
+        setattr(agent, "model", "gpt-5.5")
+        setattr(agent, "base_url", "https://chatgpt.com/backend-api/codex")
+
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(
+                _mock_client(
+                    base_url="https://coding-intl.dashscope.aliyuncs.com/v1/",
+                    api_key="alibaba-key",
+                ),
+                "qwen3.7-max",
+            ),
+        ) as mock_rpc:
+            assert agent._try_activate_fallback() is True
+
+        assert mock_rpc.call_args.kwargs["explicit_base_url"] is None
+        assert agent.provider == "alibaba-coding-plan"
+        assert agent.base_url == "https://coding-intl.dashscope.aliyuncs.com/v1/"
 
     def test_nous_anthropic_fallback_uses_the_messages_wire(self):
         """Portal Claude fallbacks must not stay on chat_completions.
