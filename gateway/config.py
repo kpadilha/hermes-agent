@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Any, Callable
 from enum import Enum
 
 from hermes_cli.config import get_hermes_home
+from hermes_cli.env_loader import load_hermes_dotenv
 from agent.secret_scope import current_secret_scope, get_secret as _get_secret
 from gateway.shutdown_watchdog import (
     DEFAULT_LOOP_WATCHDOG_INTERVAL_S,
@@ -794,6 +795,10 @@ def load_gateway_config() -> GatewayConfig:
     from gateway import config_loader
 
     _home = get_hermes_home()
+    try:
+        load_hermes_dotenv(hermes_home=_home)
+    except Exception as e:
+        logger.debug("Failed to load Hermes .env before gateway config parse: %s", e)
     gw_data = config_loader.load_legacy_gateway_json(_home)
     try:
         config_loader.load_yaml_layer(_home, gw_data)
