@@ -1065,6 +1065,53 @@ def _write_json_excl(path: Path, record: dict[str, Any]) -> None:
         raise
 
 
+def build_recent_turn_lcm_state(
+    *,
+    completed: bool = True,
+    interrupted: bool = False,
+    failed: bool = False,
+    error: str | None = None,
+    api_calls: int | None = None,
+    tools: list[Any] | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a compact completed-turn continuity/proof scorecard."""
+    ok = bool(completed) and not bool(interrupted) and not bool(failed) and not error
+    workflow = "gateway_turn_completion"
+    success = 1 if ok else 0
+    failure = 0 if ok else 1
+    event = {
+        "workflow": workflow,
+        "outcome": "success" if ok else "failure",
+        "failure_class": None if ok else ("interrupted" if interrupted else "turn_failed"),
+        "details": {
+            "completed": bool(completed),
+            "interrupted": bool(interrupted),
+            "failed": bool(failed),
+            "error": str(error or "")[:500],
+            "api_calls": int(api_calls or 0),
+            "tool_count": len(tools or []),
+            "session_id": str(session_id or ""),
+        },
+        "recorded_at": _utc_now_iso(),
+    }
+    score = {
+        "success": success,
+        "failure": failure,
+        "total": success + failure,
+        "success_rate_pct": 100.0 if ok else 0.0,
+    }
+    return {
+        "workflow_counters": {workflow: {"success": success, "failure": failure}},
+        "recent_workflow_events": [event],
+        "scorecard": {
+            "overall": score,
+            "workflows": {workflow: dict(score)},
+            "continuity_health": "ok" if ok else "degraded",
+        },
+    }
+
+
 def _apply_set_fields(target: dict[str, Any], fields) -> None:
     """Assign each ``(key, value, coerce)`` whose value was explicitly passed (not ``_UNSET``)."""
     for key, value, coerce in fields:
@@ -1079,7 +1126,10 @@ def _coerce_session_store(session_store: Any) -> dict[str, str]:
 
 def _prepare_runtime_status_update(
     *, gateway_state: Any = _UNSET, exit_reason: Any = _UNSET, restart_requested: Any = _UNSET,
-    active_agents: Any = _UNSET, active_work: Any = _UNSET, platform: Any = _UNSET, platform_state: Any = _UNSET,
+    active_agents: Any = _UNSET, active_work: Any = _UNSET,
+    active_agent_sessions: Any = _UNSET,
+    activity_status_version: Any = _UNSET, activity_changed_at: Any = _UNSET,
+    platform: Any = _UNSET, platform_state: Any = _UNSET,
     error_code: Any = _UNSET, error_message: Any = _UNSET, needs_attention: Any = _UNSET,
     retrying_since: Any = _UNSET, served_profiles: Any = _UNSET, session_store: Any = _UNSET,
     multiplex_standalone_reason: Any = _UNSET,
@@ -1127,7 +1177,12 @@ def _prepare_runtime_status_update(
             ("gateway_state", gateway_state, None), ("exit_reason", exit_reason, None),
             ("restart_requested", restart_requested, bool),
             ("active_agents", active_agents, parse_active_agents),
+            # Named in-flight units (see GatewayShutdownMixin._describe_active_work); None clears.
             ("active_work", active_work, lambda v: list(v) if v else None),
+            ("active_agent_sessions", active_agent_sessions,
+             lambda v: [str(item) for item in v] if isinstance(v, (list, tuple, set)) else []),
+            ("activity_status_version", activity_status_version, int),
+            ("activity_changed_at", activity_changed_at, lambda v: v or _utc_now_iso()),
             ("served_profiles", served_profiles, lambda v: list(v or [])),
             ("multiplex_standalone_reason", multiplex_standalone_reason, lambda v: str(v) if v else None),
             ("session_store", session_store, _coerce_session_store),
