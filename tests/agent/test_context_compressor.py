@@ -474,6 +474,77 @@ class TestCompress:
         c.compression_count = 0
         c._previous_summary = "[CONTEXT SUMMARY]: earlier work"
         assert c._effective_protect_first_n() == 0
+    def test_relevance_pins_are_included_in_summary_prompt_when_enabled(self):
+        captured = {}
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "## Active Task\nUser asked about compressor."
+
+        def fake_call_llm(**kwargs):
+            captured["prompt"] = kwargs["messages"][0]["content"]
+            return mock_response
+
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="test",
+                quiet_mode=True,
+                protect_first_n=1,
+                protect_last_n=2,
+                relevance_pinning_enabled=True,
+                relevance_pinning_min_score=1,
+            )
+
+        messages = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "Initial setup"},
+            {"role": "assistant", "content": "Ready"},
+            {"role": "user", "content": "Decision: agent/context_compressor.py preserves primary_auth_expiry."},
+            {"role": "assistant", "content": "Recorded root cause."},
+            {"role": "assistant", "content": "Additional unrelated progress."},
+            {"role": "user", "content": "Latest: what happened with primary_auth_expiry in agent/context_compressor.py?"},
+        ]
+
+        with patch("agent.context_compressor.call_llm", side_effect=fake_call_llm):
+            c.compress(messages)
+
+        assert "REFERENCE-ONLY RELEVANT OLDER CONTEXT" in captured["prompt"]
+        assert "agent/context_compressor.py" in captured["prompt"]
+        assert "primary_auth_expiry" in captured["prompt"]
+        assert "not as active user instructions" in captured["prompt"]
+
+    def test_relevance_pins_absent_from_summary_prompt_when_disabled(self):
+        captured = {}
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "## Active Task\nUser asked about compressor."
+
+        def fake_call_llm(**kwargs):
+            captured["prompt"] = kwargs["messages"][0]["content"]
+            return mock_response
+
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="test",
+                quiet_mode=True,
+                protect_first_n=1,
+                protect_last_n=2,
+                relevance_pinning_enabled=False,
+            )
+
+        messages = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "Initial setup"},
+            {"role": "assistant", "content": "Ready"},
+            {"role": "user", "content": "Decision: agent/context_compressor.py preserves primary_auth_expiry."},
+            {"role": "assistant", "content": "Recorded root cause."},
+            {"role": "assistant", "content": "Additional unrelated progress."},
+            {"role": "user", "content": "Latest: what happened with primary_auth_expiry in agent/context_compressor.py?"},
+        ]
+
+        with patch("agent.context_compressor.call_llm", side_effect=fake_call_llm):
+            c.compress(messages)
+
+        assert "REFERENCE-ONLY RELEVANT OLDER CONTEXT" not in captured["prompt"]
 
 
 class TestGenerateSummaryNoneContent:
