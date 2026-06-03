@@ -6232,7 +6232,7 @@ class TurnRunner:
             final_response = _sanitize_gateway_final_response(ctx.source.platform, final_response)
             if not final_response:
                 final_response = f"⚠️ {result['error']}" if result.get("error") else ""
-            return {
+            no_response_result = {
                 "final_response": final_response,
                 "messages": result.get("messages", []),
                 "api_calls": result.get("api_calls", 0),
@@ -6261,6 +6261,11 @@ class TurnRunner:
                 "model": _resolved_model,
                 "context_length": _context_length,
             }
+            self._runner._record_recent_turn_lcm_state(
+                no_response_result,
+                session_id=no_response_result.get("session_id"),
+            )
+            return no_response_result
 
         # Scan tool results for MEDIA:<path> tags that need to be delivered
         # as native audio/file attachments.  The TTS tool embeds MEDIA: tags
@@ -6308,7 +6313,7 @@ class TurnRunner:
         # _attach_session_title_callback), because the titler now fires from
         # inside the turn prologue rather than from here.
 
-        return {
+        success_result = {
             "final_response": final_response,
             "last_reasoning": result.get("last_reasoning"),
             "messages": ctx.result_holder[0].get("messages", []) if ctx.result_holder[0] else [],
@@ -6350,6 +6355,8 @@ class TurnRunner:
             # True preserves the skip-db behaviour for the standard runtime.
             "agent_persisted": (ctx.result_holder[0].get("agent_persisted", True) if ctx.result_holder[0] else True),
         }
+        self._runner._record_recent_turn_lcm_state(success_result, session_id=effective_session_id)
+        return success_result
 
 
 
@@ -8076,6 +8083,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._exit_reason = reason
         self._shutdown_event.set()
 
+    def _active_agent_session_keys(self) -> list[str]:
+        try:
+            return sorted(str(key) for key in self._running_agents.keys())
+        except Exception:
+            return []
+
     def _running_agent_count(self) -> int:
         return len(self._running_agents)
 
@@ -8596,6 +8609,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 exit_reason=exit_reason,
                 restart_requested=self._restart_requested,
                 active_agents=self._active_work_count(),
+                active_agent_sessions=self._active_agent_session_keys(),
+                activity_status_version=1,
+                activity_changed_at=None,
             )
         except Exception:
             pass
@@ -8621,6 +8637,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             write_runtime_status(active_agents=self._active_work_count())
         except Exception:
             pass
+
+    def _record_recent_turn_lcm_state(self, result: dict | None, *, session_id: str | None = None) -> None:
+        """Persist completed-turn proof/continuity telemetry for health dashboards."""
+        if not isinstance(result, dict):
+            return
+        try:
+            from gateway.status import build_recent_turn_lcm_state, write_runtime_status
+
+            lcm_recent_turn = build_recent_turn_lcm_state(
+                completed=bool(result.get("completed", True)),
+                interrupted=bool(result.get("interrupted", False)),
+                failed=bool(result.get("failed", False)),
+                error=result.get("error"),
+                api_calls=result.get("api_calls"),
+                tools=result.get("tools") if isinstance(result.get("tools"), list) else [],
+                session_id=session_id or result.get("session_id"),
+            )
+            write_runtime_status(lcm_recent_turn=lcm_recent_turn)
+        except Exception:
+            logger.debug("Failed to write recent-turn LCM runtime status", exc_info=True)
 
     # ------------------------------------------------------------------
     # External drain control (NAS-driven quiesce-without-restart, Phase 2).
@@ -17367,6 +17403,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _claim_state.turn.agent = _AGENT_PENDING_SENTINEL
         _claim_state.turn.started_ts = time.time()
         self._persist_active_agents()
+        self._update_runtime_status("running")
         _run_generation = self._begin_session_run_generation(_quick_key)
 
         try:
@@ -25709,6 +25746,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # between lifecycle transitions.  Preserves gateway_state (see
         # _persist_active_agents).
         self._persist_active_agents()
+        try:
+            self._update_runtime_status("draining" if self._draining else "running")
+        except Exception:
+            pass
         return True
 
     def _release_turn_lease(self, session_key: str, run_generation: int) -> bool:
@@ -27987,8 +28028,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 return
             self._session_state(session_key).turn.agent = agent_holder[0]
-            if self._draining:
-                self._update_runtime_status("draining")
+            self._update_runtime_status("draining" if self._draining else "running")
         
         tracking_task = asyncio.create_task(track_agent())
         
@@ -28944,8 +28984,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 self._release_running_agent_state(
                     session_key, run_generation=run_generation
                 )
-            if self._draining:
-                self._update_runtime_status("draining")
+            self._update_runtime_status("draining" if self._draining else "running")
             
             # Wait for cancelled tasks
             for task in [progress_task, log_task, interrupt_monitor, tracking_task, _notify_task]:
