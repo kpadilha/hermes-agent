@@ -5419,8 +5419,12 @@ def _build_architecture_dashboard(
 
     fallback_status = runtime_scorecard.get("runtime_health") if isinstance(fallback_workflow, dict) else "unknown"
     active_agents = int(runtime_state.get("active_agents", 0) or 0) if isinstance(runtime_state, dict) else 0
-    continuity_required = bool(continuity_workflows) or active_agents > 0
-    continuity_status = recent_turn_scorecard.get("continuity_health") if continuity_workflows else ("not_applicable" if not continuity_required else "unknown")
+    # A live in-flight turn is not missing completed-turn continuity proof.
+    # Require recent-turn coverage only when a recent-turn scorecard exists;
+    # otherwise mark the signal not_applicable so active conversations do not
+    # make the global architecture dashboard permanently unknown mid-turn.
+    continuity_required = bool(continuity_workflows)
+    continuity_status = recent_turn_scorecard.get("continuity_health") if continuity_workflows else "not_applicable"
     memory_status = memory_scorecard.get("memory_sync_health") if memory_workflows else "unknown"
     memory_write_signal = memory_workflows.get("memory_write_propagation")
     memory_audit_signal = memory_workflows.get("memory_audit")
