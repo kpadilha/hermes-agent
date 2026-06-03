@@ -94,7 +94,7 @@ def test_analyze_cron_internal_warnings_ignores_non_cron_tool_errors(tmp_path):
     log = tmp_path / 'agent.log'
     log.write_text(
         "2026-06-03 WARNING [session_user456] Tool session_search returned error: "
-        "around_message_id 1 not in session_id abc\n",
+        "around_message_id 1 not in session_id abc; captured output mentioned [cron_abc] but was not the log context\n",
         encoding='utf-8',
     )
 
