@@ -87,6 +87,11 @@ compression:
   codex_gpt55_autoraise: true  # gpt-5.5 on Codex OAuth: raise trigger to 85% (default: true)
   codex_gpt55_autoraise_notice: true  # Show the one-time autoraise notice (default: true)
   codex_app_server_auto: native  # native|hermes|off for Codex app-server thread compaction
+  relevance_pinning:         # Optional lexical MVP, default-off
+    enabled: false
+    max_pins: 8
+    max_pin_chars_total: 12000
+    min_score: 3
 
 # Summarization model/provider configured under auxiliary:
 auxiliary:
@@ -107,6 +112,10 @@ auxiliary:
 | `codex_gpt55_autoraise` | `true` | bool | Raise the trigger to 85% for gpt-5.5 on the ChatGPT Codex OAuth route (see below). Set `false` to keep the global `threshold` |
 | `codex_gpt55_autoraise_notice` | `true` | bool | Show the one-time Codex gpt-5.5 autoraise notice. Set `false` to keep the 85% autoraise but suppress the banner |
 | `codex_app_server_auto` | `native` | `native`, `hermes`, `off` | Thread-compaction mode for Codex app-server sessions (see below) |
+| `relevance_pinning.enabled` | `false` | boolean | When enabled, selects lexical reference-only pins from the middle window for the summarizer |
+| `relevance_pinning.max_pins` | `8` | ≥0 | Maximum number of older excerpts to include as summary source material |
+| `relevance_pinning.max_pin_chars_total` | `12000` | ≥0 | Total character budget for selected pin excerpts |
+| `relevance_pinning.min_score` | `3` | integer | Minimum deterministic relevance score required for a pin |
 
 ### Codex gpt-5.5 threshold autoraise
 
@@ -154,6 +163,29 @@ mechanism instead:
 Hermes' local transcript is never rewritten on this runtime — state.db records
 the compaction boundary while the visible transcript stays intact. All other
 routes (including Codex OAuth chat sessions) keep Hermes' summary compressor.
+
+### Relevant Context Pinning (default-off)
+
+`compression.relevance_pinning` is a dependency-free lexical MVP that helps the
+summarizer notice important older details before the middle window is compacted.
+It does **not** add old turns back as live conversation messages. Instead, the
+compressor passes selected excerpts to the summarizer under a clearly marked
+`REFERENCE-ONLY RELEVANT OLDER CONTEXT` block.
+
+The selector favors exact, inspectable handles:
+
+- file paths such as `agent/context_compressor.py`
+- error/code tokens such as `TypeError`, `HTTP 401`, `primary_auth_expiry`, `#10896`
+- quoted phrases and compact item references such as `itens 1 e 2`
+- user decisions/blockers/root-cause markers
+
+Standalone old `tool` results are skipped so compression does not manufacture
+orphan tool context. If relevance selection fails, compression logs a warning
+and continues without pins. For offline validation, run:
+
+```bash
+python scripts/eval_context_relevance.py
+```
 
 ### Computed Values (for a 200K context model at defaults)
 
