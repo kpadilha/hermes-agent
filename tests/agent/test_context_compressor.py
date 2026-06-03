@@ -2,6 +2,7 @@
 
 import pytest
 import time
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 from agent.context_compressor import (
@@ -322,12 +323,13 @@ class TestCompress:
 
     def test_compression_increments_count(self, compressor):
         msgs = self._make_messages(10)
-        # Default config (abort_on_summary_failure=False) — fallback path
-        # increments the count even on summary failure.
-        compressor.compress(msgs)
-        assert compressor.compression_count == 1
-        compressor.compress(msgs)
-        assert compressor.compression_count == 2
+        # Force the deterministic fallback path; live auxiliary credentials make
+        # this test flaky and can trigger timeout cooldown instead of fallback.
+        with patch("agent.context_compressor.call_llm", side_effect=RuntimeError("no provider")):
+            compressor.compress(msgs)
+            assert compressor.compression_count == 1
+            compressor.compress(msgs)
+            assert compressor.compression_count == 2
 
     def test_protects_first_and_last(self, compressor):
         msgs = self._make_messages(10)
@@ -405,6 +407,77 @@ class TestCompress:
         c.compression_count = 0
         c._previous_summary = "[CONTEXT SUMMARY]: earlier work"
         assert c._effective_protect_first_n() == 0
+    def test_relevance_pins_are_included_in_summary_prompt_when_enabled(self):
+        captured = {}
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "## Active Task\nUser asked about compressor."
+
+        def fake_call_llm(**kwargs):
+            captured["prompt"] = kwargs["messages"][0]["content"]
+            return mock_response
+
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="test",
+                quiet_mode=True,
+                protect_first_n=1,
+                protect_last_n=2,
+                relevance_pinning_enabled=True,
+                relevance_pinning_min_score=1,
+            )
+
+        messages = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "Initial setup"},
+            {"role": "assistant", "content": "Ready"},
+            {"role": "user", "content": "Decision: agent/context_compressor.py preserves primary_auth_expiry."},
+            {"role": "assistant", "content": "Recorded root cause."},
+            {"role": "assistant", "content": "Additional unrelated progress."},
+            {"role": "user", "content": "Latest: what happened with primary_auth_expiry in agent/context_compressor.py?"},
+        ]
+
+        with patch("agent.context_compressor.call_llm", side_effect=fake_call_llm):
+            c.compress(messages)
+
+        assert "REFERENCE-ONLY RELEVANT OLDER CONTEXT" in captured["prompt"]
+        assert "agent/context_compressor.py" in captured["prompt"]
+        assert "primary_auth_expiry" in captured["prompt"]
+        assert "not as active user instructions" in captured["prompt"]
+
+    def test_relevance_pins_absent_from_summary_prompt_when_disabled(self):
+        captured = {}
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "## Active Task\nUser asked about compressor."
+
+        def fake_call_llm(**kwargs):
+            captured["prompt"] = kwargs["messages"][0]["content"]
+            return mock_response
+
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="test",
+                quiet_mode=True,
+                protect_first_n=1,
+                protect_last_n=2,
+                relevance_pinning_enabled=False,
+            )
+
+        messages = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "Initial setup"},
+            {"role": "assistant", "content": "Ready"},
+            {"role": "user", "content": "Decision: agent/context_compressor.py preserves primary_auth_expiry."},
+            {"role": "assistant", "content": "Recorded root cause."},
+            {"role": "assistant", "content": "Additional unrelated progress."},
+            {"role": "user", "content": "Latest: what happened with primary_auth_expiry in agent/context_compressor.py?"},
+        ]
+
+        with patch("agent.context_compressor.call_llm", side_effect=fake_call_llm):
+            c.compress(messages)
+
+        assert "REFERENCE-ONLY RELEVANT OLDER CONTEXT" not in captured["prompt"]
 
 
 class TestTailBudgetCodexReplayFields:
@@ -957,6 +1030,42 @@ class TestSummaryFallbackToMainModel:
         assert c._last_aux_model_failure_model == "broken-aux-model"
         assert c._last_aux_model_failure_error is not None
         assert "404" in c._last_aux_model_failure_error
+
+    def test_relevant_pins_survive_summary_model_fallback_retry(self):
+        mock_ok = MagicMock()
+        mock_ok.choices = [MagicMock()]
+        mock_ok.choices[0].message.content = "summary via main model"
+
+        err_404 = Exception("404 model_not_found: no such model")
+        err_404.status_code = 404
+
+        pin = SimpleNamespace(
+            index=3,
+            role="user",
+            score=9,
+            reason="exact+path",
+            excerpt="Decision: agent/context_compressor.py preserves primary_auth_expiry.",
+        )
+
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="main-model",
+                summary_model_override="broken-aux-model",
+                quiet_mode=True,
+            )
+
+        with patch(
+            "agent.context_compressor.call_llm",
+            side_effect=[err_404, mock_ok],
+        ) as mock_call:
+            result = c._generate_summary(self._msgs(), relevant_pins=[pin])
+
+        assert mock_call.call_count == 2
+        retry_prompt = mock_call.call_args_list[1].kwargs["messages"][0]["content"]
+        assert "REFERENCE-ONLY RELEVANT OLDER CONTEXT" in retry_prompt
+        assert "agent/context_compressor.py" in retry_prompt
+        assert "primary_auth_expiry" in retry_prompt
+        assert result is not None
 
     def test_unknown_error_falls_back_to_main_and_succeeds(self):
         """Errors that don't match the 404/503/model_not_found fast-path
