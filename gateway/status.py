@@ -415,6 +415,49 @@ def _build_runtime_status_record() -> dict[str, Any]:
     return payload
 
 
+def _current_process_is_gateway_runtime() -> bool:
+    """Return True when the current process is the gateway daemon/runtime.
+
+    CLI inspection commands like ``hermes gateway health`` should be able to
+    update auxiliary runtime fields without hijacking the canonical daemon PID.
+    Distinguish the real gateway process (`gateway run`) from operator/CLI
+    subcommands (`gateway health`, `gateway status`, etc.).
+    """
+    argv = [str(part) for part in sys.argv]
+    return "gateway" in argv and "run" in argv
+
+
+def _runtime_status_identity_is_live_gateway(payload: dict[str, Any]) -> bool:
+    """Return True if the stored runtime identity still belongs to a live gateway."""
+    try:
+        pid = int(payload.get("pid"))
+    except (TypeError, ValueError):
+        return False
+
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+    recorded_start = payload.get("start_time")
+    current_start = _get_process_start_time(pid)
+    if recorded_start is not None and current_start is not None and recorded_start != current_start:
+        return False
+
+    argv = payload.get("argv")
+    if isinstance(argv, list) and argv:
+        return _record_looks_like_gateway(payload)
+    return _looks_like_gateway_process(pid)
+
+
+def _get_live_gateway_identity_record() -> Optional[dict[str, Any]]:
+    """Return the live gateway identity from gateway.pid when available."""
+    record = _read_pid_record()
+    if not isinstance(record, dict):
+        return None
+    return record if _runtime_status_identity_is_live_gateway(record) else None
+
+
 def _read_json_file(path: Path) -> Optional[dict[str, Any]]:
     if not path.exists():
         return None
@@ -748,21 +791,38 @@ def write_runtime_status(
     exit_reason: Any = _UNSET,
     restart_requested: Any = _UNSET,
     active_agents: Any = _UNSET,
-    platform: Any = _UNSET,
+    platform: Optional[str] = None,
     platform_state: Any = _UNSET,
+    updated_at: Any = _UNSET,
     error_code: Any = _UNSET,
     error_message: Any = _UNSET,
     served_profiles: Any = _UNSET,
+    lcm_runtime: Any = _UNSET,
+    lcm_recent_turn: Any = _UNSET,
+    lcm_memory: Any = _UNSET,
+    lcm_gateway: Any = _UNSET,
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status."""
     path = _get_runtime_status_path()
+
     payload = _read_json_file(path) or _build_runtime_status_record()
     current_record = _build_pid_record()
     payload.setdefault("platforms", {})
-    payload["kind"] = current_record["kind"]
-    payload["pid"] = current_record["pid"]
-    payload["argv"] = current_record["argv"]
-    payload["start_time"] = current_record["start_time"]
+    payload.setdefault("kind", _GATEWAY_KIND)
+    if _current_process_is_gateway_runtime():
+        payload["pid"] = current_record["pid"]
+        payload["start_time"] = current_record["start_time"]
+        payload["argv"] = current_record["argv"]
+    elif not _runtime_status_identity_is_live_gateway(payload):
+        live_record = _get_live_gateway_identity_record()
+        if live_record:
+            payload["pid"] = live_record.get("pid")
+            payload["start_time"] = live_record.get("start_time")
+            payload["argv"] = live_record.get("argv")
+        elif not payload.get("pid"):
+            payload["pid"] = current_record["pid"]
+            payload["start_time"] = current_record["start_time"]
+            payload["argv"] = current_record["argv"]
     payload["updated_at"] = _utc_now_iso()
 
     if gateway_state is not _UNSET:
@@ -779,7 +839,7 @@ def write_runtime_status(
         # coverage without a second probe.
         payload["served_profiles"] = list(served_profiles or [])
 
-    if platform is not _UNSET:
+    if platform is not _UNSET and platform is not None:
         platform_payload = payload["platforms"].get(platform, {})
         if platform_state is not _UNSET:
             platform_payload["state"] = platform_state
@@ -789,6 +849,15 @@ def write_runtime_status(
             platform_payload["error_message"] = error_message
         platform_payload["updated_at"] = _utc_now_iso()
         payload["platforms"][platform] = platform_payload
+
+    if lcm_runtime is not _UNSET:
+        payload["lcm_runtime"] = lcm_runtime
+    if lcm_recent_turn is not _UNSET:
+        payload["lcm_recent_turn"] = lcm_recent_turn
+    if lcm_memory is not _UNSET:
+        payload["lcm_memory"] = lcm_memory
+    if lcm_gateway is not _UNSET:
+        payload["lcm_gateway"] = lcm_gateway
 
     _write_json_file(path, payload)
 
