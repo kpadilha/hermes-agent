@@ -210,6 +210,34 @@ class TestFallbackChainAdvancement:
         ):
             assert agent._try_activate_fallback() is True
             assert agent.api_mode == "anthropic_messages"
+    def test_named_fallback_without_base_url_does_not_inherit_primary_url(self):
+        """A built-in provider fallback must resolve its own endpoint.
+
+        Regression guard for a production failure where alibaba-coding-plan
+        was activated after openai-codex but attempted qwen3.7-max against
+        https://chatgpt.com/backend-api/codex, producing deterministic 404s.
+        """
+        fbs = [{"provider": "alibaba-coding-plan", "model": "qwen3.7-max"}]
+        agent = _make_agent(fallback_model=fbs)
+        setattr(agent, "provider", "openai-codex")
+        setattr(agent, "model", "gpt-5.5")
+        setattr(agent, "base_url", "https://chatgpt.com/backend-api/codex")
+
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(
+                _mock_client(
+                    base_url="https://coding-intl.dashscope.aliyuncs.com/v1/",
+                    api_key="alibaba-key",
+                ),
+                "qwen3.7-max",
+            ),
+        ) as mock_rpc:
+            assert agent._try_activate_fallback() is True
+
+        assert mock_rpc.call_args.kwargs["explicit_base_url"] is None
+        assert agent.provider == "alibaba-coding-plan"
+        assert agent.base_url == "https://coding-intl.dashscope.aliyuncs.com/v1/"
 
 
 # ── Pool-rotation vs fallback gating (#11314) ────────────────────────────
