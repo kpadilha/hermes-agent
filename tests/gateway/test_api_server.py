@@ -565,7 +565,8 @@ class TestAgentExecution:
         mock_agent.session_completion_tokens = 2
         mock_agent.session_total_tokens = 3
 
-        with patch.object(adapter, "_create_agent", return_value=mock_agent):
+        with patch.object(adapter, "_create_agent", return_value=mock_agent), \
+             patch("gateway.status.write_runtime_status") as mock_write:
             result, usage = await adapter._run_agent(
                 user_message="hello",
                 conversation_history=[],
@@ -579,6 +580,10 @@ class TestAgentExecution:
         # the annotation — header will fall back to the provided session_id.
         assert result["final_response"] == "ok"
         assert usage == {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+        mock_write.assert_called_once()
+        lcm_recent_turn = mock_write.call_args.kwargs["lcm_recent_turn"]
+        assert lcm_recent_turn["scorecard"]["continuity_health"] == "ok"
+        assert lcm_recent_turn["recent_workflow_events"][-1]["details"]["session_id"] == "session-123"
         mock_agent.run_conversation.assert_called_once_with(
             user_message="hello",
             conversation_history=[],
