@@ -95,6 +95,11 @@ compression:
   codex_responses_native: false  # gpt-5.6 on direct OpenAI/Codex: server-side compaction (opt-in)
   codex_responses_compact_threshold: 200000  # Server-side compaction trigger (input tokens)
   in_place: true             # Compact on the same session id, no rotation (default: true)
+  relevance_pinning:         # Optional lexical MVP, default-off
+    enabled: false
+    max_pins: 8
+    max_pin_chars_total: 12000
+    min_score: 3
 
 # Summarization model/provider configured under auxiliary:
 auxiliary:
@@ -122,6 +127,10 @@ auxiliary:
 | `codex_responses_native` | `false` | bool | Opt in to OpenAI's server-side compaction on the Responses API. Engages only for gpt-5.6-family models on the direct OpenAI API or a ChatGPT Codex subscription (see below) |
 | `codex_responses_compact_threshold` | `200000` | ≥1 tokens | Server-side compaction trigger in input tokens. Clamped below the local compression threshold at request time so the server compacts first |
 | `in_place` | `true` | bool | Compact on the same session id instead of rotating to a new one (see below) |
+| `relevance_pinning.enabled` | `false` | boolean | When enabled, selects lexical reference-only pins from the middle window for the summarizer |
+| `relevance_pinning.max_pins` | `8` | ≥0 | Maximum number of older excerpts to include as summary source material |
+| `relevance_pinning.max_pin_chars_total` | `12000` | ≥0 | Total character budget for selected pin excerpts |
+| `relevance_pinning.min_score` | `3` | integer | Minimum deterministic relevance score required for a pin |
 
 ### In-place compaction (single stable session id)
 
@@ -242,6 +251,29 @@ rejection of the field disables native compaction for the session and retries
 the request without it. Switching the session to a non-eligible model or route
 simply stops the field from being sent — captured checkpoints are dropped from
 replay by the existing cross-issuer guard when the endpoint changes.
+
+### Relevant Context Pinning (default-off)
+
+`compression.relevance_pinning` is a dependency-free lexical MVP that helps the
+summarizer notice important older details before the middle window is compacted.
+It does **not** add old turns back as live conversation messages. Instead, the
+compressor passes selected excerpts to the summarizer under a clearly marked
+`REFERENCE-ONLY RELEVANT OLDER CONTEXT` block.
+
+The selector favors exact, inspectable handles:
+
+- file paths such as `agent/context_compressor.py`
+- error/code tokens such as `TypeError`, `HTTP 401`, `primary_auth_expiry`, `#10896`
+- quoted phrases and compact item references such as `itens 1 e 2`
+- user decisions/blockers/root-cause markers
+
+Standalone old `tool` results are skipped so compression does not manufacture
+orphan tool context. If relevance selection fails, compression logs a warning
+and continues without pins. For offline validation, run:
+
+```bash
+python scripts/eval_context_relevance.py
+```
 
 ### Computed Values (for a 200K context model at defaults)
 
