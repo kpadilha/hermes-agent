@@ -1890,6 +1890,17 @@ def init_agent(
     compression_idle_compact_after_seconds = max(
         0, int(_compression_cfg.get("idle_compact_after_seconds", 0))
     )
+    _relevance_pinning_cfg = _compression_cfg.get("relevance_pinning", {})
+    if not isinstance(_relevance_pinning_cfg, dict):
+        _relevance_pinning_cfg = {}
+    relevance_pinning_enabled = str(
+        _relevance_pinning_cfg.get("enabled", False)
+    ).lower() in {"true", "1", "yes"}
+    relevance_pinning_max_pins = int(_relevance_pinning_cfg.get("max_pins", 8))
+    relevance_pinning_max_chars_total = int(
+        _relevance_pinning_cfg.get("max_pin_chars_total", 12000)
+    )
+    relevance_pinning_min_score = int(_relevance_pinning_cfg.get("min_score", 3))
 
     # Read optional explicit context_length override for the auxiliary
     # compression model. Custom endpoints often cannot report this via
@@ -2305,6 +2316,10 @@ def init_agent(
             max_tokens=agent.max_tokens,
             model_thresholds=compression_model_thresholds,
             threshold_tokens_cap=compression_threshold_tokens,
+            relevance_pinning_enabled=relevance_pinning_enabled,
+            relevance_pinning_max_pins=relevance_pinning_max_pins,
+            relevance_pinning_max_chars_total=relevance_pinning_max_chars_total,
+            relevance_pinning_min_score=relevance_pinning_min_score,
         )
     _bind_session_state = getattr(agent.context_compressor, "bind_session_state", None)
     if callable(_bind_session_state):
