@@ -1369,6 +1369,17 @@ def init_agent(
     compression_in_place = is_truthy_value(
         _compression_cfg.get("in_place"), default=False
     )
+    _relevance_pinning_cfg = _compression_cfg.get("relevance_pinning", {})
+    if not isinstance(_relevance_pinning_cfg, dict):
+        _relevance_pinning_cfg = {}
+    relevance_pinning_enabled = str(
+        _relevance_pinning_cfg.get("enabled", False)
+    ).lower() in {"true", "1", "yes"}
+    relevance_pinning_max_pins = int(_relevance_pinning_cfg.get("max_pins", 8))
+    relevance_pinning_max_chars_total = int(
+        _relevance_pinning_cfg.get("max_pin_chars_total", 12000)
+    )
+    relevance_pinning_min_score = int(_relevance_pinning_cfg.get("min_score", 3))
 
     # Read optional explicit context_length override for the auxiliary
     # compression model. Custom endpoints often cannot report this via
@@ -1591,6 +1602,10 @@ def init_agent(
             relevance_pinning_max_chars_total=relevance_pinning_max_chars_total,
             relevance_pinning_min_score=relevance_pinning_min_score,
             max_tokens=agent.max_tokens,
+            relevance_pinning_enabled=relevance_pinning_enabled,
+            relevance_pinning_max_pins=relevance_pinning_max_pins,
+            relevance_pinning_max_chars_total=relevance_pinning_max_chars_total,
+            relevance_pinning_min_score=relevance_pinning_min_score,
         )
     agent.compression_enabled = compression_enabled
 
