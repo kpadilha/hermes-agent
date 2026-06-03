@@ -9,6 +9,11 @@ ROOT = Path('/home/krishna')
 HEALTH_PATH = ROOT / '.hermes/scripts/health_check.py'
 RAW_SCRIPT_PATH = ROOT / '.hermes/scripts/kb_raw_intake_processor_cron.py'
 SAFE_RESTART_PATH = ROOT / '.hermes/scripts/hermes_safe_gateway_restart.py'
+ALIGNMENT_SCOUT_PATH = ROOT / '.hermes/scripts/hermes_upstream_alignment_scout.py'
+ALIGNMENT_ORCH_PATH = ROOT / '.hermes/scripts/hermes_alignment_candidate_orchestrator.py'
+AUTOAPPLY_CRON_PATH = ROOT / '.hermes/scripts/hermes_alignment_candidate_autoapply_cron.sh'
+PARITY_GUARD_SH_PATH = ROOT / '.hermes/scripts/hermes_upstream_parity_guard.sh'
+REPO_PYTHON = ROOT / '.hermes/hermes-agent/venv/bin/python'
 
 
 def load_health_module():
@@ -187,3 +192,36 @@ def test_kb_raw_intake_pending_files_fail_closed(tmp_path):
 
     assert proc.returncode != 0
     assert 'pending raw files require semantic processing' in proc.stdout
+
+
+def test_alignment_scout_direct_invocation_reexecs_to_repo_venv_python():
+    if not REPO_PYTHON.exists():
+        pytest.skip('Hermes repo venv python unavailable')
+    proc = subprocess.run(
+        ['/usr/bin/python3', str(ALIGNMENT_SCOUT_PATH), '--preflight-only'],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    payload = json.loads(proc.stdout)
+    assert payload['python'] == str(REPO_PYTHON.resolve())
+    assert payload['pyyaml'] is True
+
+
+def test_alignment_orchestrator_uses_repo_python_for_scout_and_parity():
+    text = ALIGNMENT_ORCH_PATH.read_text(encoding='utf-8')
+
+    assert 'PY_BIN = repo_python()' in text
+    assert 'run([PY_BIN, str(SCOUT)]' in text
+    assert 'run([PY_BIN, str(PARITY)]' in text
+
+
+def test_alignment_shell_wrappers_prefer_repo_venv_before_python3():
+    for path in (AUTOAPPLY_CRON_PATH, PARITY_GUARD_SH_PATH):
+        text = path.read_text(encoding='utf-8')
+        assert '"$REPO/venv/bin/python"' in text
+        assert 'python3' in text
+        assert text.index('"$REPO/venv/bin/python"') < text.index('python3')
