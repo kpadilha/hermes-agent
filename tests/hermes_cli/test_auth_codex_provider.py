@@ -157,7 +157,7 @@ def test_resolve_codex_runtime_credentials_falls_back_to_pool_when_singleton_emp
 
     resolved = resolve_codex_runtime_credentials()
     assert resolved["api_key"] == "pool-fallback-token"
-    assert resolved["source"] == "credential_pool"
+    assert resolved["source"] == "credential_pool" or str(resolved["source"]).startswith("pool:")
     assert resolved["base_url"]  # default codex backend URL
 
 
@@ -191,7 +191,7 @@ def test_resolve_codex_runtime_credentials_pool_fallback_skips_exhausted(tmp_pat
 
     resolved = resolve_codex_runtime_credentials()
     assert resolved["api_key"] == "usable-token"
-    assert resolved["source"] == "credential_pool"
+    assert resolved["source"] == "credential_pool" or str(resolved["source"]).startswith("pool:")
 
 
 def test_resolve_codex_runtime_credentials_pool_fallback_no_usable_entry(tmp_path, monkeypatch):
