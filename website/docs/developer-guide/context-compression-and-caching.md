@@ -85,6 +85,11 @@ compression:
   target_ratio: 0.20         # How much of threshold to keep as tail (default: 0.20)
   protect_last_n: 20         # Minimum protected tail messages (default: 20)
   codex_gpt55_autoraise: true  # gpt-5.5 on Codex OAuth: raise trigger to 85% (default: true)
+  relevance_pinning:         # Optional lexical MVP, default-off
+    enabled: false
+    max_pins: 8
+    max_pin_chars_total: 12000
+    min_score: 3
 
 # Summarization model/provider configured under auxiliary:
 auxiliary:
@@ -103,6 +108,10 @@ auxiliary:
 | `protect_last_n` | `20` | ≥1 | Minimum number of recent messages always preserved |
 | `protect_first_n` | `3` | (hardcoded) | System prompt + first exchange always preserved |
 | `codex_gpt55_autoraise` | `true` | bool | Raise the trigger to 85% for gpt-5.5 on the ChatGPT Codex OAuth route (see below). Set `false` to keep the global `threshold` |
+| `relevance_pinning.enabled` | `false` | boolean | When enabled, selects lexical reference-only pins from the middle window for the summarizer |
+| `relevance_pinning.max_pins` | `8` | ≥0 | Maximum number of older excerpts to include as summary source material |
+| `relevance_pinning.max_pin_chars_total` | `12000` | ≥0 | Total character budget for selected pin excerpts |
+| `relevance_pinning.min_score` | `3` | integer | Minimum deterministic relevance score required for a pin |
 
 ### Codex gpt-5.5 threshold autoraise
 
@@ -117,6 +126,29 @@ your global `threshold`. To opt back down to the global value:
 
 ```bash
 hermes config set compression.codex_gpt55_autoraise false
+```
+
+### Relevant Context Pinning (default-off)
+
+`compression.relevance_pinning` is a dependency-free lexical MVP that helps the
+summarizer notice important older details before the middle window is compacted.
+It does **not** add old turns back as live conversation messages. Instead, the
+compressor passes selected excerpts to the summarizer under a clearly marked
+`REFERENCE-ONLY RELEVANT OLDER CONTEXT` block.
+
+The selector favors exact, inspectable handles:
+
+- file paths such as `agent/context_compressor.py`
+- error/code tokens such as `TypeError`, `HTTP 401`, `primary_auth_expiry`, `#10896`
+- quoted phrases and compact item references such as `itens 1 e 2`
+- user decisions/blockers/root-cause markers
+
+Standalone old `tool` results are skipped so compression does not manufacture
+orphan tool context. If relevance selection fails, compression logs a warning
+and continues without pins. For offline validation, run:
+
+```bash
+python scripts/eval_context_relevance.py
 ```
 
 ### Computed Values (for a 200K context model at defaults)
