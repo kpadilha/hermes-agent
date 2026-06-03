@@ -1,0 +1,81 @@
+[
+  {
+    "name": "old path-specific decision",
+    "focus_topic": null,
+    "candidate_start": 1,
+    "candidate_end": 5,
+    "expected_substrings": ["agent/context_compressor.py", "preserve latest user"],
+    "unexpected_substrings": ["weather"],
+    "messages": [
+      {"role": "system", "content": "System prompt"},
+      {"role": "user", "content": "What is the weather today?"},
+      {"role": "assistant", "content": "Sunny."},
+      {"role": "user", "content": "Decision: agent/context_compressor.py must preserve latest user requests during compression."},
+      {"role": "assistant", "content": "Recorded the compression decision and root cause."},
+      {"role": "user", "content": "Latest: what did we decide about agent/context_compressor.py preserving latest user requests?"}
+    ]
+  },
+  {
+    "name": "old error message",
+    "focus_topic": null,
+    "candidate_start": 1,
+    "candidate_end": 5,
+    "expected_substrings": ["primary_auth_expiry", "HTTP 401"],
+    "unexpected_substrings": ["lunch"],
+    "messages": [
+      {"role": "system", "content": "System prompt"},
+      {"role": "user", "content": "Lunch note: pasta was fine."},
+      {"role": "assistant", "content": "Noted."},
+      {"role": "user", "content": "Blocked: health_check.py emitted primary_auth_expiry after HTTP 401 from model ping."},
+      {"role": "assistant", "content": "Root cause likely stale auth."},
+      {"role": "user", "content": "Latest: explain primary_auth_expiry and HTTP 401 again."}
+    ]
+  },
+  {
+    "name": "compact item reference",
+    "focus_topic": "itens 1 e 2",
+    "candidate_start": 1,
+    "candidate_end": 6,
+    "expected_substrings": ["Item 1", "Item 2"],
+    "unexpected_substrings": ["Item 3"],
+    "messages": [
+      {"role": "system", "content": "System prompt"},
+      {"role": "user", "content": "Item 1: add lexical relevance pins."},
+      {"role": "assistant", "content": "Item 1 recorded."},
+      {"role": "user", "content": "Item 2: keep pins reference-only."},
+      {"role": "assistant", "content": "Item 2 recorded."},
+      {"role": "user", "content": "Item 3: unrelated future embeddings."},
+      {"role": "user", "content": "Latest: vamos com itens 1 e 2."}
+    ]
+  },
+  {
+    "name": "irrelevant old chat filtered",
+    "focus_topic": null,
+    "candidate_start": 1,
+    "candidate_end": 4,
+    "expected_substrings": [],
+    "unexpected_substrings": ["weather", "coffee"],
+    "messages": [
+      {"role": "system", "content": "System prompt"},
+      {"role": "user", "content": "Weather was rainy."},
+      {"role": "assistant", "content": "Coffee was mentioned."},
+      {"role": "user", "content": "Random small talk."},
+      {"role": "user", "content": "Latest: debug agent/context_compressor.py TypeError."}
+    ]
+  },
+  {
+    "name": "old resolved request reference only",
+    "focus_topic": null,
+    "candidate_start": 1,
+    "candidate_end": 4,
+    "expected_substrings": ["already answered", "agent/context_compressor.py"],
+    "unexpected_substrings": [],
+    "messages": [
+      {"role": "system", "content": "System prompt"},
+      {"role": "user", "content": "Resolved: already answered request about agent/context_compressor.py fallback behavior."},
+      {"role": "assistant", "content": "Answered and closed."},
+      {"role": "user", "content": "Unrelated transition."},
+      {"role": "user", "content": "Latest: summarize agent/context_compressor.py fallback behavior, do not redo old work."}
+    ]
+  }
+]
