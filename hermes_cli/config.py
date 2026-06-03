@@ -1373,6 +1373,12 @@ DEFAULT_CONFIG = {
                                       # session_search and recoverable, not deleted.
                                       # Default False during rollout; will flip on
                                       # after live validation.
+        "relevance_pinning": {       # Optional lexical MVP: select reference-only
+            "enabled": False,        # older middle-window excerpts for the summarizer.
+            "max_pins": 8,
+            "max_pin_chars_total": 12000,
+            "min_score": 3,
+        },
     },
 
     # Kanban subsystem (orchestrator workers + dispatcher-driven child tasks).
