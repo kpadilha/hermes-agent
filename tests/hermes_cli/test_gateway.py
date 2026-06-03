@@ -217,12 +217,6 @@ def test_gateway_run_subprocess_preserves_daemon_exit_codes(
     assert completed.returncode == expected_exit, completed.stderr
 
 
-
-
-
-
-
-
 def test_s6_runtime_snapshot_reports_supervised_service(monkeypatch, tmp_path):
     service_dir = tmp_path / "gateway-default"
     service_dir.mkdir()

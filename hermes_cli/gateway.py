@@ -2,12 +2,12 @@
 
 Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 """
-
 import asyncio
 import contextlib
 from hermes_cli.cli_output import line_input
 from hermes_cli.gateway_host_record import _discard_dead_host_record, _forget_host_gateway_probe
 import json
+import getpass
 import logging
 import os
 import shutil
@@ -5566,7 +5566,8 @@ def _cmd_migrate(args):
 _GATEWAY_SUBCOMMANDS = {
     None: _cmd_run, "run": _cmd_run, "setup": _cmd_setup, "install": _cmd_install,
     "uninstall": _cmd_uninstall, "start": _cmd_start, "stop": _cmd_stop, "restart": _cmd_restart,
-    "status": _cmd_status, "list": _cmd_list, "migrate-legacy": _cmd_migrate_legacy, "migrate": _cmd_migrate,
+    "status": _cmd_status, "list": _cmd_list, "migrate-legacy": _cmd_migrate_legacy,
+    "migrate": _cmd_migrate,
 }
 
 

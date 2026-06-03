@@ -201,6 +201,16 @@ def build_gateway_parser(
     _add_system_flag(gateway_status)
     _add_compat_platform_flag(gateway_status)
 
+    # Native registrars own top-level names; adapt the registered health alias
+    # onto this built-in namespace without importing plugin implementation.
+    from hermes_cli.plugins import discover_plugins, get_plugin_manager
+
+    discover_plugins()
+    extension = get_plugin_manager()._cli_commands.get("gateway-health")
+    if extension is not None:
+        health = gateway_subparsers.add_parser("health", help="Print canonical gateway health payload")
+        extension["setup_fn"](health)
+
     # gateway install
     gateway_install = gateway_subparsers.add_parser(
         "install", help="Install gateway as a systemd/launchd background service")
