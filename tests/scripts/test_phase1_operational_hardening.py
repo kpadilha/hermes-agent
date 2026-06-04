@@ -55,6 +55,28 @@ def test_analyze_cron_internal_warnings_detects_known_tool_failures(tmp_path):
     assert findings['count'] == 2
     assert 'file_not_found' in findings['classes']
     assert 'session_search_mismatch' in findings['classes']
+    assert findings['summary'].startswith('count=2')
+    assert 'Action:' in findings['summary']
+
+
+def test_analyze_cron_internal_warnings_classifies_runtime_path_failures(tmp_path):
+    mod = load_health_module()
+    log = tmp_path / 'agent.log'
+    log.write_text(
+        "2026-06-04 02:00:28 WARNING [cron_8fdc183388f1_20260604_020023] "
+        "Tool read_file returned error: File not found: /home/krishna/gbrain/RESOLVER.md\n"
+        "2026-06-04 02:15:04 WARNING [cron_8fdc183388f1_20260604_020023] "
+        "Tool terminal returned error: env: ‘bun’: No such file or directory; exit_code\": 127\n",
+        encoding='utf-8',
+    )
+
+    findings = mod.analyze_cron_internal_warnings([log], max_age_hours=48)
+
+    assert findings['count'] == 2
+    assert 'file_not_found' in findings['classes']
+    assert 'command_not_found' in findings['classes']
+    assert findings['jobs']['8fdc183388f1']['count'] == 2
+    assert 'export the cron PATH explicitly' in findings['summary']
 
 
 def test_check_gateway_drain_timeouts_warns_on_recent_journal_match(monkeypatch):
