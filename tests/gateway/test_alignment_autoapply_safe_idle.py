@@ -162,3 +162,85 @@ def test_schedule_restart_script_revalidates_safe_idle_before_restart(monkeypatc
     assert "--safe-idle-check" in script
     assert "restart_deferred_by_safe_idle_revalidation" in script
     assert script.index("--safe-idle-check") < script.index("systemctl --user restart hermes-gateway")
+
+
+def test_autoapply_cron_restart_uses_post_delivery_grace(monkeypatch):
+    """Cron auto-apply runs inside the gateway scheduler.
+
+    A restart scheduled with the generic short delay can kill the gateway while
+    the cron subsystem is still delivering the result message, producing the
+    observed ``cannot schedule new futures after interpreter shutdown`` delivery
+    error. Cron auto-apply must use a delay long enough to let delivery finish;
+    the scheduled script still revalidates safe-idle immediately before restart.
+    """
+    mod = load_autoapply()
+    captured = {}
+    monkeypatch.setenv("HERMES_ALIGNMENT_AUTOAPPLY", "1")
+    monkeypatch.setattr(mod, "wait_for_safe_gateway_idle", lambda: (True, [{"pid": 123}], "idle_stable"))
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stdout="queued")
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    result = mod.schedule_gateway_restart()
+
+    assert result["rc"] == 0
+    assert result["delay_seconds"] >= 120
+    assert f"--on-active={result['delay_seconds']}" in captured["cmd"]
+
+
+def test_manual_restart_keeps_short_delay(monkeypatch):
+    mod = load_autoapply()
+    captured = {}
+    monkeypatch.delenv("HERMES_ALIGNMENT_AUTOAPPLY", raising=False)
+    monkeypatch.setattr(mod, "wait_for_safe_gateway_idle", lambda: (True, [{"pid": 123}], "idle_stable"))
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stdout="queued")
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    result = mod.schedule_gateway_restart()
+
+    assert result["delay_seconds"] == 5
+    assert "--on-active=5" in captured["cmd"]
+
+
+def test_restart_scheduled_status_rejects_same_prefix_unrelated_failure(monkeypatch):
+    mod = load_autoapply()
+
+    payload = {
+        "tests": {"rc": 0},
+        "gateway_restart": {"rc": 0},
+        "health": {"failures": ["gateway_proof_health: database connection lost"]},
+        "git": {"dirty": "", "head_origin_production": "0\t0"},
+    }
+
+    assert mod.status_for_restart_scheduled(payload) == "applied_verification_failed"
+
+
+def test_restart_scheduled_status_allows_only_restart_pending_health_failures(monkeypatch):
+    mod = load_autoapply()
+
+    payload = {
+        "status": "applied_verification_failed",
+        "tests": {"rc": 0},
+        "gateway_restart": {"rc": 0},
+        "health": {
+            "failures": [
+                "gateway_proof_health: gateway proof health degraded (degraded)",
+                "architecture_dashboard: hermes_acts=ok, honcho_remembers=ok, lcm_proves=degraded, overall=degraded",
+                "vertex_lcm: 70% (warn<95 critical<90)",
+                "vertex_overall: 70% (warn<95 critical<90)",
+            ]
+        },
+        "git": {"dirty": "", "head_origin_production": "0\t0"},
+    }
+
+    assert mod.status_for_restart_scheduled(payload) == "applied_verified_restart_scheduled"
+
+    payload["health"]["failures"].append("nvidia_gpu: driver unavailable")
+    assert mod.status_for_restart_scheduled(payload) == "applied_verification_failed"
