@@ -293,6 +293,16 @@ def check_discord_requirements() -> bool:
     return True
 
 
+def _discord_truncate(text: Any, limit: int, *, suffix: str = "...") -> str:
+    """Truncate text for Discord component/embed limits."""
+    value = "" if text is None else str(text)
+    if len(value) <= limit:
+        return value
+    if limit <= len(suffix):
+        return suffix[:limit]
+    return value[: limit - len(suffix)] + suffix
+
+
 def _build_allowed_mentions():
     """Build Discord ``AllowedMentions`` with safe defaults, overridable via env.
 
@@ -4713,15 +4723,21 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
-            # Discord embed description limit is 4096; show full command up to that
-            max_desc = 4088
-            cmd_display = command if len(command) <= max_desc else command[: max_desc - 3] + "..."
+            # Discord embed description limit is 4096 including code fences;
+            # field values are capped at 1024. Keep button delivery reliable
+            # even when the security scanner emits a long explanation.
+            max_desc = 4096
+            cmd_display = _discord_truncate(command, max_desc - len("```\n\n```"))
             embed = discord.Embed(
                 title="⚠️ Command Approval Required",
                 description=f"```\n{cmd_display}\n```",
                 color=discord.Color.orange(),
             )
-            embed.add_field(name="Reason", value=description, inline=False)
+            embed.add_field(
+                name="Reason",
+                value=_discord_truncate(description, 1024),
+                inline=False,
+            )
 
             view = ExecApprovalView(
                 session_key=session_key,
