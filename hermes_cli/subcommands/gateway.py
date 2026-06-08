@@ -149,6 +149,18 @@ def build_gateway_parser(
     )
     _add_compat_platform_flag(gateway_status)
 
+    # gateway health
+    gateway_health = gateway_subparsers.add_parser(
+        "health",
+        help="Print canonical gateway health payload",
+    )
+    gateway_health.add_argument(
+        "--system",
+        action="store_true",
+        help="Target the Linux system-level gateway service",
+    )
+    gateway_health.add_argument("--json", action="store_true", help="Output JSON")
+
     # gateway install
     gateway_install = gateway_subparsers.add_parser(
         "install", help="Install gateway as a systemd/launchd background service"
