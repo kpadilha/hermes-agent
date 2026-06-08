@@ -2495,6 +2495,16 @@ async def _dispose_unused_adapter(adapter: "BasePlatformAdapter | None") -> None
         )
 
 
+def _normalize_tool_progress_mode(value, *, default: str = "all") -> str:
+    """Normalize display.tool_progress values for gateway runtime use."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return "all" if value else "off"
+    mode = str(value).strip().lower()
+    return mode or default
+
+
 class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
     """
     Main gateway controller.
@@ -14879,8 +14889,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         progress_mode = (
             _env_tp
             if _env_tp and not _tool_progress_configured
-            else (_resolved_tp or _env_tp or "all")
+            else (_resolved_tp if _resolved_tp is not None else (_env_tp or "all"))
         )
+        progress_mode = _normalize_tool_progress_mode(progress_mode)
         # Tool progress grouping: "accumulate" (edit one bubble) or "separate" (one msg per tool)
         progress_grouping = resolve_display_setting(user_config, platform_key, "tool_progress_grouping") or "accumulate"
         # Disable tool progress for webhooks - they don't support message editing,
@@ -16193,16 +16204,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             "Button-based approval failed, falling back to text: %s", _e
                         )
 
-                # Fallback: plain text approval prompt.  Use the adapter's
+                # Fallback: plain text approval prompt. Use the adapter's
                 # typed prefix so Slack/Matrix users are told the form they
-                # can actually type (`!approve`) — typed "/" is blocked in
-                # Slack threads and reserved by Matrix clients.
+                # can actually type, while keeping the message compact enough
+                # that approval prompts stay scannable and do not dump full
+                # security scanner output into chat.
                 _p = getattr(_status_adapter, "typed_command_prefix", "/")
                 cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
+                desc_preview = desc[:1000] + "..." if len(desc) > 1000 else desc
                 msg = (
                     f"⚠️ **Dangerous command requires approval:**\n"
                     f"```\n{cmd_preview}\n```\n"
-                    f"Reason: {desc}\n\n"
+                    f"Reason: {desc_preview}\n\n"
                     f"Reply `{_p}approve` to execute, `{_p}approve session` to approve this pattern "
                     f"for the session, `{_p}approve always` to approve permanently, or `{_p}deny` to cancel."
                 )
