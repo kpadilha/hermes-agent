@@ -11871,6 +11871,26 @@ def cmd_memory(args):
         save_config(config)
         print("\n  ✓ Memory provider: built-in only")
         print("  Saved to config.yaml\n")
+    elif sub == "ledger":
+        from hermes_cli.memory_ledger_cmd import memory_ledger_command
+
+        memory_ledger_command(args)
+    elif sub == "eval":
+        from hermes_cli.memory_eval_cmd import memory_eval_command
+
+        memory_eval_command(args)
+    elif sub == "reconcile":
+        from hermes_cli.memory_reconcile_cmd import memory_reconcile_command
+
+        memory_reconcile_command(args)
+    elif sub == "graph":
+        from hermes_cli.memory_graph_cmd import memory_graph_command
+
+        memory_graph_command(args)
+    elif sub == "snapshot":
+        from hermes_cli.memory_snapshot_cmd import memory_snapshot_command
+
+        memory_snapshot_command(args)
     elif sub == "reset":
         from hermes_constants import get_hermes_home, display_hermes_home
 
