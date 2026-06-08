@@ -206,3 +206,10 @@ class TestVerboseCommand:
         """The /verbose command is recognized by the gateway dispatch."""
         from hermes_cli.commands import GATEWAY_KNOWN_COMMANDS
         assert "verbose" in GATEWAY_KNOWN_COMMANDS
+
+
+def test_tool_progress_false_normalizes_to_off():
+    assert gateway_run._normalize_tool_progress_mode(False) == "off"
+    assert gateway_run._normalize_tool_progress_mode("off") == "off"
+    assert gateway_run._normalize_tool_progress_mode(None) == "all"
+
