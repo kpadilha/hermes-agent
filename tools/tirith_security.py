@@ -21,11 +21,14 @@ never blocks.
 """
 
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import platform
+import re
 import shutil
+import shlex
 import stat
 import subprocess
 import tarfile
@@ -33,6 +36,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from urllib.parse import urlparse
 
 from hermes_constants import get_hermes_home
 
@@ -851,6 +855,23 @@ def check_command_security(command: str) -> dict:
             findings = []
             summary = ""
 
+    # LAN health/status probes are normal in local-first Hermes/Niko setups.
+    # Tirith's raw-IP/private-network/plain-HTTP heuristics are useful for
+    # public IPs, opaque network fetches, SSRF, and execution chains; but
+    # prompting on a read-only GET/HEAD to an RFC1918/link-local health/status
+    # endpoint creates noise and trains operators to bypass blockers. Downgrade
+    # only the narrow case where every finding is one of these LAN-probe
+    # context warnings and the command shape is an inspect-only private-LAN
+    # status probe. Anything mixed with another finding, mutating HTTP
+    # method/data, credentials, redirects to execution, or shell chaining
+    # remains a warning/block.
+    if action == "warn" and findings:
+        non_suppressible = [f for f in findings if not _is_safe_lan_probe_context_finding(f)]
+        if not non_suppressible and _is_private_lan_readonly_probe(command):
+            action = "allow"
+            findings = []
+            summary = ""
+
     return {"action": action, "findings": findings, "summary": summary}
 
 
@@ -869,3 +890,130 @@ def _is_app_tld_finding(finding: dict) -> bool:
         if val is not None and ".app" in str(val).lower():
             return True
     return False
+
+
+_URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
+_SHELL_CHAIN_RE = re.compile(r"\||&&|\|\||;|`|\$\(|>|<")
+_READONLY_PROBE_PATHS = (
+    "/",
+    "/health",
+    "/healthz",
+    "/status",
+    "/version",
+    "/metrics",
+    "/api/tags",
+    "/api/version",
+)
+_MUTATING_CURL_FLAGS = {
+    "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
+    "-F", "--form", "--form-string", "-T", "--upload-file",
+}
+_CREDENTIAL_FLAGS = {"-u", "--user", "--oauth2-bearer", "--proxy-user"}
+_MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_READONLY_METHODS = {"GET", "HEAD"}
+
+
+def _is_safe_lan_probe_context_finding(finding: dict) -> bool:
+    """Return True for findings tolerated only on safe private-LAN probes."""
+    if not isinstance(finding, dict):
+        return False
+    text = _finding_text(finding)
+    human_text = text.replace("_", " ")
+    return (
+        "raw_ip" in text
+        or "ip_address_url" in text
+        or "private_network" in text
+        or "private network access" in human_text
+        or "plain_http" in text
+        or "plain http" in human_text
+        or "unencrypted http" in human_text
+        or "url uses raw ip address" in human_text
+        or "url points to ip address" in human_text
+    )
+
+
+def _finding_text(finding: dict) -> str:
+    return " ".join(
+        str(finding.get(field, "") or "")
+        for field in ("rule_id", "id", "name", "title", "detail", "description", "message", "summary")
+    ).lower().replace("-", "_")
+
+
+def _is_raw_ip_url_finding(finding: dict) -> bool:
+    """Return True for Tirith findings that only flag a raw-IP URL.
+
+    Tirith rule names can drift between releases, so match both durable-ish
+    rule identifiers and the human-readable text emitted in warnings such as
+    "URL uses raw IP address".
+    """
+    if not isinstance(finding, dict):
+        return False
+    text = _finding_text(finding)
+    human_text = text.replace("_", " ")
+    return (
+        "raw_ip" in text
+        or "ip_address_url" in text
+        or "url uses raw ip address" in human_text
+        or "url points to ip address" in human_text
+    )
+
+
+def _is_private_lan_readonly_probe(command: str) -> bool:
+    """Return True for narrowly-scoped private-LAN read-only health probes."""
+    if not command or _SHELL_CHAIN_RE.search(command):
+        return False
+
+    urls = _URL_RE.findall(command)
+    if not urls or not all(_is_private_http_probe_url(url) for url in urls):
+        return False
+
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+
+    executable = os.path.basename(tokens[0])
+    if executable not in {"curl", "wget"}:
+        return False
+
+    method = "GET"
+    for index, token in enumerate(tokens):
+        if token in _MUTATING_CURL_FLAGS or token in _CREDENTIAL_FLAGS:
+            return False
+        if token.startswith("-d") and token != "--dump-header":
+            return False
+        if token.startswith("-F") or token.startswith("-T"):
+            return False
+        if token in {"-H", "--header", "--proxy-header"} and index + 1 < len(tokens):
+            header = tokens[index + 1].lower()
+            if "authorization:" in header or "cookie:" in header:
+                return False
+        if token == "-X" and index + 1 < len(tokens):
+            method = tokens[index + 1].upper()
+        elif token.startswith("-X") and len(token) > 2:
+            method = token[2:].upper()
+        elif token.startswith("--request="):
+            method = token.split("=", 1)[1].upper()
+        elif token == "--method" and index + 1 < len(tokens):
+            method = tokens[index + 1].upper()
+        elif token.startswith("--method="):
+            method = token.split("=", 1)[1].upper()
+
+    if method in _MUTATING_METHODS or method not in _READONLY_METHODS:
+        return False
+    return True
+
+
+def _is_private_http_probe_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").strip("[]")
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if not (ip.is_private or ip.is_loopback or ip.is_link_local):
+        return False
+    path = parsed.path or "/"
+    return any(path == allowed or path.startswith(allowed + "/") for allowed in _READONLY_PROBE_PATHS)
