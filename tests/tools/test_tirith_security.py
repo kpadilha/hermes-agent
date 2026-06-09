@@ -764,6 +764,89 @@ class TestEmojiVariationSelectorSuppression:
         assert result["findings"] == findings
 
 
+class TestPrivateLanRawIpSuppression:
+    """Raw private-IP warnings are suppressed only for read-only status probes."""
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_private_lan_health_probe_warn_downgraded_to_allow(self, mock_cfg, mock_run):
+        mock_cfg.return_value = _CFG
+        findings = [
+            {
+                "rule_id": "raw_ip_url",
+                "message": "URL uses raw IP address: URL points to IP address 192.168.1.86 instead of a domain name",
+            },
+            {
+                "rule_id": "plain_http_execution",
+                "message": "URL uses unencrypted HTTP in execution context",
+            },
+            {
+                "rule_id": "private_network_access",
+                "message": "Command accesses private network address 192.168.1.86",
+            },
+        ]
+        mock_run.return_value = _mock_run(2, _json_stdout(findings, "raw IP"))
+        result = check_command_security("curl -fsS http://192.168.1.86:11434/api/tags")
+        assert result["action"] == "allow"
+        assert result["findings"] == []
+        assert result["summary"] == ""
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_public_raw_ip_warning_preserved(self, mock_cfg, mock_run):
+        mock_cfg.return_value = _CFG
+        findings = [{"rule_id": "raw_ip_url", "message": "URL uses raw IP address"}]
+        mock_run.return_value = _mock_run(2, _json_stdout(findings, "raw IP"))
+        result = check_command_security("curl -fsS http://93.184.216.34/health")
+        assert result["action"] == "warn"
+        assert len(result["findings"]) == 1
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_private_raw_ip_post_preserved(self, mock_cfg, mock_run):
+        mock_cfg.return_value = _CFG
+        findings = [{"rule_id": "raw_ip_url", "message": "URL uses raw IP address"}]
+        mock_run.return_value = _mock_run(2, _json_stdout(findings, "raw IP"))
+        result = check_command_security("curl -fsS -X POST http://192.168.1.86:11434/api/tags")
+        assert result["action"] == "warn"
+        assert len(result["findings"]) == 1
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_private_raw_ip_with_pipe_preserved(self, mock_cfg, mock_run):
+        mock_cfg.return_value = _CFG
+        findings = [{"rule_id": "raw_ip_url", "message": "URL uses raw IP address"}]
+        mock_run.return_value = _mock_run(2, _json_stdout(findings, "raw IP"))
+        result = check_command_security("curl -fsS http://192.168.1.86:11434/api/tags | python3")
+        assert result["action"] == "warn"
+        assert len(result["findings"]) == 1
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_private_raw_ip_mixed_findings_preserve_warn(self, mock_cfg, mock_run):
+        mock_cfg.return_value = _CFG
+        findings = [
+            {"rule_id": "raw_ip_url", "message": "URL uses raw IP address"},
+            {"rule_id": "shortened_url", "severity": "medium"},
+        ]
+        mock_run.return_value = _mock_run(2, _json_stdout(findings, "mixed"))
+        result = check_command_security("curl -fsS http://192.168.1.86:11434/api/tags")
+        assert result["action"] == "warn"
+        assert len(result["findings"]) == 2
+
+
+class TestIsAppTldFinding:
+    """Unit tests for the _is_app_tld_finding helper."""
+
+    @pytest.mark.parametrize("finding, expected", [
+        ({"rule_id": "lookalike_tld", "value": ".APP"}, True),   # case-insensitive
+        ({"rule_id": "lookalike_tld", "message": "Domain uses '.app' TLD"}, True),
+        ({"rule_id": "shortened_url", "value": ".app"}, False),  # wrong rule_id
+        ({"rule_id": "lookalike_tld", "value": ".zip"}, False),  # other TLD
+    ])
+    def test_app_tld_detection(self, finding, expected):
+        from tools.tirith_security import _is_app_tld_finding
+        assert _is_app_tld_finding(finding) is expected
 
 
 # ---------------------------------------------------------------------------
