@@ -192,12 +192,14 @@ def test_last_commit_paths_returns_head_minus_one_to_head():
     mod = load_parity()
     repo = Path("/home/krishna/.hermes/hermes-agent")
 
-    # The most recent commit on production is d19ef33c7, which added
-    # tools/tirith_security.py + tests/tools/test_tirith_security.py. Both
-    # are cold paths; this verifies the helper targets the right range.
+    # The helper must return a non-empty list of paths whenever a HEAD exists.
+    # We do not assert specific files because HEAD moves whenever a new
+    # commit lands; instead we assert structural properties: the result is a
+    # list of non-empty strings, with at least one item (a HEAD commit always
+    # changes at least one file unless it is a no-op merge).
     paths = mod.last_commit_paths()
     assert isinstance(paths, list)
-    assert "tools/tirith_security.py" in paths
-    # We do not assert the exact set because HEAD might move, but the helper
-    # must return a non-empty list whenever HEAD exists.
-    assert paths
+    assert paths, "last_commit_paths() returned empty for a non-empty HEAD"
+    for p in paths:
+        assert isinstance(p, str)
+        assert p.strip(), "empty path entry"
