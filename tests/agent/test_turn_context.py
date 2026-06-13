@@ -799,3 +799,18 @@ def test_prologue_names_a_subagent_run_through_the_writer_handle():
     agent.persistence.sessions.set_auto_title.assert_called_once_with(
         "sess-1", "Subagent: Audit the billing module", source=TitleSource.DERIVED)
     assert not agent._session_db.set_auto_title.called
+
+
+def test_active_topic_context_is_returned_as_ephemeral_plugin_context():
+    agent = _FakeAgent()
+    with patch(
+        "agent.active_topic_resolver.build_active_topic_context",
+        lambda *a, **k: "<active_topic_context>project_slug: demo</active_topic_context>",
+    ):
+        ctx = _build(agent, user_message="continue", conversation_history=[{"role": "user", "content": "prior topic"}])
+
+    assert "project_slug: demo" in ctx.plugin_user_context
+    # The clean transcript content stays untouched; ephemeral context rides the
+    # API-only sidecar used for this turn and replay.
+    assert ctx.messages[-1]["content"] == "continue"
+    assert "project_slug: demo" in ctx.messages[-1]["api_content"]
