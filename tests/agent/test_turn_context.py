@@ -549,3 +549,34 @@ def test_prologue_forwards_the_submit_title_preview_to_the_titler():
               "display_metadata": {"title_preview": "Pasted 5000 chars"}}],
         )
     assert titler.call_args.kwargs["title_preview"] == "Pasted 5000 chars"
+
+
+def test_expired_cooldown_allows_preflight(tmp_path):
+    agent = _make_agent_with_cooldown(
+        tmp_path / "state.db",
+        "sess-1",
+        cooldown_until=1.0,
+    )
+    agent._request_pressure_anchored = True
+
+    with patch("agent.turn_context._should_run_preflight_estimate", return_value=True), \
+         patch("agent.turn_context._preflight_request_tokens", side_effect=[999_999, 0]):
+        ctx = _build(agent)
+
+    assert isinstance(ctx, TurnContext)
+    agent._compress_context.assert_called()
+
+
+def test_active_topic_context_is_returned_as_ephemeral_plugin_context():
+    agent = _FakeAgent()
+    with patch(
+        "agent.active_topic_resolver.build_active_topic_context",
+        lambda *a, **k: "<active_topic_context>project_slug: demo</active_topic_context>",
+    ):
+        ctx = _build(agent, user_message="continue", conversation_history=[{"role": "user", "content": "prior topic"}])
+
+    assert "project_slug: demo" in ctx.plugin_user_context
+    # The clean transcript content stays untouched; ephemeral context rides the
+    # API-only sidecar used for this turn and replay.
+    assert ctx.messages[-1]["content"] == "continue"
+    assert "project_slug: demo" in ctx.messages[-1]["api_content"]
