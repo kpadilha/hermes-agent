@@ -185,3 +185,17 @@ def test_no_review_when_memory_disabled():
     agent = _FakeAgent()
     ctx = _build(agent)
     assert ctx.should_review_memory is False
+
+
+def test_active_topic_context_is_returned_as_ephemeral_plugin_context():
+    agent = _FakeAgent()
+    with patch(
+        "agent.active_topic_resolver.build_active_topic_context",
+        lambda *a, **k: "<active_topic_context>project_slug: demo</active_topic_context>",
+    ):
+        ctx = _build(agent, user_message="continue", conversation_history=[{"role": "user", "content": "prior topic"}])
+
+    assert "project_slug: demo" in ctx.plugin_user_context
+    # The persisted/working user message is not mutated; conversation_loop injects
+    # plugin_user_context only into the API-call copy.
+    assert ctx.messages[-1] == {"role": "user", "content": "continue"}
