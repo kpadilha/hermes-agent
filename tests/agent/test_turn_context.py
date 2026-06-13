@@ -452,3 +452,31 @@ def test_prologue_does_not_title_machine_driven_runs(platform):
     overwritten or never read.
     """
     assert not _title_turn(platform).called
+
+def test_expired_cooldown_allows_preflight(tmp_path):
+    agent = _make_agent_with_cooldown(
+        tmp_path / "state.db",
+        "sess-1",
+        cooldown_until=1.0,
+    )
+
+    with patch("agent.turn_context._should_run_preflight_estimate", return_value=True), \
+         patch("agent.turn_context.estimate_request_tokens_rough", return_value=999_999):
+        ctx = _build(agent)
+
+    assert isinstance(ctx, TurnContext)
+    agent._emit_status.assert_called_once()
+    agent._compress_context.assert_called()
+
+def test_active_topic_context_is_returned_as_ephemeral_plugin_context():
+    agent = _FakeAgent()
+    with patch(
+        "agent.active_topic_resolver.build_active_topic_context",
+        lambda *a, **k: "<active_topic_context>project_slug: demo</active_topic_context>",
+    ):
+        ctx = _build(agent, user_message="continue", conversation_history=[{"role": "user", "content": "prior topic"}])
+
+    assert "project_slug: demo" in ctx.plugin_user_context
+    # The persisted/working user message is not mutated; conversation_loop injects
+    # plugin_user_context only into the API-call copy.
+    assert ctx.messages[-1] == {"role": "user", "content": "continue"}
