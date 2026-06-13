@@ -579,9 +579,43 @@ def _collect_pre_llm_call_context(
     agent: Any, *, effective_task_id: str, turn_id: str, original_user_message: Any,
     messages: List[Any], conversation_history: Optional[List[Any]],
 ) -> str:
-    """Run ``pre_llm_call`` plugins; their context is injected into the user message
-    (never the system prompt). Oversized per-hook context is spilled to disk so a
-    runaway plugin can't inflate every subsequent turn's prompt."""
+    """Collect deterministic active-topic and ``pre_llm_call`` plugin context.
+
+    Context is injected into the user message, never the system prompt. Oversized
+    per-hook context is spilled to disk so a runaway plugin cannot inflate later turns.
+    """
+    active_topic_context = ""
+    try:
+        from agent.active_topic_resolver import build_active_topic_context
+
+        active_topic_config = {}
+        config = getattr(agent, "_config", None) or {}
+        configured = (
+            config.get("agent", {}).get("active_topic")
+            if isinstance(config, dict)
+            else None
+        )
+        if isinstance(configured, dict):
+            if "min_confidence" in configured:
+                active_topic_config["min_confidence"] = float(configured["min_confidence"])
+            if "min_topic_evidence" in configured:
+                active_topic_config["min_topic_evidence"] = int(
+                    configured["min_topic_evidence"]
+                )
+        active_topic_context = build_active_topic_context(
+            original_user_message,
+            conversation_history,
+            agent=agent,
+            **active_topic_config,
+        )
+        if active_topic_context:
+            logger.info(
+                "active topic context resolved for continuation turn: session=%s",
+                agent.session_id or "none",
+            )
+    except Exception as exc:
+        logger.warning("active topic resolver failed: %s", exc)
+
     try:
         from hermes_cli.lifecycle import invoke_hook as _invoke_hook
         _pre_results = _invoke_hook(
@@ -607,7 +641,7 @@ def _collect_pre_llm_call_context(
         except Exception:
             _spill_if_oversized = None  # type: ignore[assignment]
             _spill_config_cached = None
-        _ctx_parts: list[str] = []
+        _ctx_parts = [active_topic_context] if active_topic_context else []
         for r in _pre_results:
             if isinstance(r, dict) and r.get("context"):
                 _piece = str(r["context"])
@@ -627,7 +661,7 @@ def _collect_pre_llm_call_context(
         return "\n\n".join(_ctx_parts)
     except Exception as exc:
         logger.warning("pre_llm_call hook failed: %s", exc)
-    return ""
+    return active_topic_context
 
 
 def _merge_gateway_notes(
