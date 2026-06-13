@@ -412,8 +412,46 @@ def build_turn_context(
                 if not _compressor.should_compress(_preflight_tokens):
                     break
 
+    # Built-in deterministic active-topic continuity context. This is injected
+    # into the current user message at API-call time via plugin_user_context,
+    # not into the cached system prompt and not into persisted messages.
+    # The resolver preserves cross-session continuity by design, but enforces
+    # an evidence gate: the current user message must contribute topical
+    # tokens to the resolved project (not just a continuation regex match).
+    active_topic_context = ""
+    try:
+        from agent.active_topic_resolver import build_active_topic_context
+
+        # Tunable via config.yaml agent.active_topic.{min_confidence, min_topic_evidence}.
+        # Defaults live in agent.active_topic_resolver for back-compat.
+        _atc_kwargs: dict[str, Any] = {}
+        try:
+            _agent_cfg = getattr(agent, "_config", None) or {}
+            _atc_cfg = _agent_cfg.get("agent", {}).get("active_topic") if isinstance(_agent_cfg, dict) else None
+        except Exception:
+            _atc_cfg = None
+        if isinstance(_atc_cfg, dict):
+            if "min_confidence" in _atc_cfg:
+                _atc_kwargs["min_confidence"] = float(_atc_cfg["min_confidence"])
+            if "min_topic_evidence" in _atc_cfg:
+                _atc_kwargs["min_topic_evidence"] = int(_atc_cfg["min_topic_evidence"])
+
+        active_topic_context = build_active_topic_context(
+            original_user_message,
+            conversation_history,
+            agent=agent,
+            **_atc_kwargs,
+        )
+        if active_topic_context:
+            logger.info(
+                "active topic context resolved for continuation turn: session=%s",
+                agent.session_id or "none",
+            )
+    except Exception as exc:
+        logger.warning("active topic resolver failed: %s", exc)
+
     # Plugin hook: pre_llm_call (context injected into user message, not system prompt).
-    plugin_user_context = ""
+    plugin_user_context = active_topic_context
     try:
         from hermes_cli.plugins import invoke_hook as _invoke_hook
         _pre_results = _invoke_hook(
@@ -429,6 +467,8 @@ def build_turn_context(
             sender_id=getattr(agent, "_user_id", None) or "",
         )
         _ctx_parts: list[str] = []
+        if active_topic_context:
+            _ctx_parts.append(active_topic_context)
         for r in _pre_results:
             if isinstance(r, dict) and r.get("context"):
                 _ctx_parts.append(str(r["context"]))
