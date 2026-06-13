@@ -398,8 +398,28 @@ def build_turn_context(
                 if not _compressor.should_compress(_preflight_tokens):
                     break
 
+    # Built-in deterministic active-topic continuity context. This is injected
+    # into the current user message at API-call time via plugin_user_context,
+    # not into the cached system prompt and not into persisted messages.
+    active_topic_context = ""
+    try:
+        from agent.active_topic_resolver import build_active_topic_context
+
+        active_topic_context = build_active_topic_context(
+            original_user_message,
+            conversation_history,
+            agent=agent,
+        )
+        if active_topic_context:
+            logger.info(
+                "active topic context resolved for continuation turn: session=%s",
+                agent.session_id or "none",
+            )
+    except Exception as exc:
+        logger.warning("active topic resolver failed: %s", exc)
+
     # Plugin hook: pre_llm_call (context injected into user message, not system prompt).
-    plugin_user_context = ""
+    plugin_user_context = active_topic_context
     try:
         from hermes_cli.plugins import invoke_hook as _invoke_hook
         _pre_results = _invoke_hook(
@@ -415,6 +435,8 @@ def build_turn_context(
             sender_id=getattr(agent, "_user_id", None) or "",
         )
         _ctx_parts: list[str] = []
+        if active_topic_context:
+            _ctx_parts.append(active_topic_context)
         for r in _pre_results:
             if isinstance(r, dict) and r.get("context"):
                 _ctx_parts.append(str(r["context"]))
