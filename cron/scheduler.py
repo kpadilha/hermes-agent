@@ -165,6 +165,19 @@ def _merge_mcp_into_per_job_toolsets(per_job: list[str], cfg: dict) -> list[str]
         if name not in result:
             result.append(name)
     return result
+def _cron_allows_built_in_memory(job: dict) -> bool:
+    """Return whether this cron agent may load the built-in memory store.
+
+    Cron agents default to ``skip_memory=True`` because scheduled prompts are
+    unattended and can otherwise pollute curated USER/MEMORY context. A small
+    number of explicitly governed maintenance jobs need the memory tool as the
+    whole point of the job; those jobs must opt in with a persisted
+    ``allow_memory``/``enable_memory`` flag and a job-scoped memory toolset.
+    """
+    if not bool(job.get("allow_memory") or job.get("enable_memory")):
+        return False
+    toolsets = job.get("enabled_toolsets") or []
+    return "memory" in {str(t).strip() for t in toolsets}
 
 
 def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
@@ -3080,7 +3093,7 @@ def run_job(
             # Without a workdir, keep cwd context discovery disabled.
             skip_context_files=not bool(_job_workdir),
             load_soul_identity=True,
-            skip_memory=True,  # Cron system prompts would corrupt user representations
+            skip_memory=not _cron_allows_built_in_memory(job),  # default off for cron; explicit opt-in for governed memory jobs
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,
