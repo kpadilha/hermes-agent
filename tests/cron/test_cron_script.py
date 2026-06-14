@@ -39,6 +39,22 @@ def cron_env(tmp_path, monkeypatch):
     return hermes_home
 
 
+class TestCronMemoryOptIn:
+    """Cron memory is disabled by default and only enabled by explicit opt-in."""
+
+    def test_cron_memory_disabled_without_explicit_flag(self):
+        from cron.scheduler import _cron_allows_built_in_memory
+
+        assert _cron_allows_built_in_memory({"enabled_toolsets": ["memory"]}) is False
+        assert _cron_allows_built_in_memory({"allow_memory": True, "enabled_toolsets": ["terminal"]}) is False
+
+    def test_cron_memory_enabled_with_flag_and_toolset(self):
+        from cron.scheduler import _cron_allows_built_in_memory
+
+        assert _cron_allows_built_in_memory({"allow_memory": True, "enabled_toolsets": ["memory"]}) is True
+        assert _cron_allows_built_in_memory({"enable_memory": True, "enabled_toolsets": ["terminal", "memory"]}) is True
+
+
 class TestJobScriptField:
     """Test that the script field is stored and retrieved correctly."""
 
