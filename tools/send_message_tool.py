@@ -847,7 +847,9 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     # limit (issue #28557). Pass the whole message in one call; media attaches
     # after all text chunks.
     if platform == Platform.TELEGRAM:
-        disable_link_previews = bool(getattr(pconfig, "extra", {}) and pconfig.extra.get("disable_link_previews"))
+        extra = getattr(pconfig, "extra", {}) or {}
+        disable_link_previews = bool(extra.get("disable_link_previews"))
+        rich_messages = bool(extra.get("rich_messages"))
         return await _send_telegram(
             pconfig.token,
             chat_id,
@@ -856,6 +858,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             thread_id=thread_id,
             disable_link_previews=disable_link_previews,
             force_document=force_document,
+            rich_messages=rich_messages,
         )
 
     # --- Discord: chunked delivery via the registry's standalone_sender_fn.
@@ -1113,8 +1116,22 @@ def _is_telegram_thread_not_found(error: Exception) -> bool:
     return "thread not found" in str(error).lower()
 
 
-async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False):
+async def _send_telegram(
+    token,
+    chat_id,
+    message,
+    media_files=None,
+    thread_id=None,
+    disable_link_previews=False,
+    force_document=False,
+    rich_messages=False,
+):
     """Send via Telegram Bot API (one-shot, no polling needed).
+
+    When ``rich_messages`` is enabled, first try Bot API ``sendRichMessage``
+    with raw markdown so tables, task lists, and other rich constructs are not
+    destroyed by MarkdownV2/HTML conversion.  If Telegram rejects rich parsing
+    or the endpoint is unavailable, fall back to the legacy sendMessage path.
 
     Applies markdown→MarkdownV2 formatting (same as the gateway adapter)
     so that bold, links, and headers render correctly.  If the message
@@ -1226,6 +1243,39 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
             formatted = ""  # suppress the separate text send below
 
         if formatted.strip():
+            if rich_messages:
+                rich_payload = {
+                    "chat_id": int_chat_id,
+                    "rich_message": {"markdown": message},
+                }
+                rich_payload.update(text_kwargs)
+                if disable_link_previews:
+                    rich_payload["link_preview_options"] = {"is_disabled": True}
+                    # ``disable_web_page_preview`` is legacy sendMessage-only.
+                    rich_payload.pop("disable_web_page_preview", None)
+                try:
+                    rich_result = await bot.do_api_request(
+                        "sendRichMessage", api_kwargs=rich_payload
+                    )
+                    rich_message_id = None
+                    if isinstance(rich_result, dict):
+                        rich_message_id = rich_result.get("message_id")
+                        if rich_message_id is None:
+                            rich_message_id = (rich_result.get("result") or {}).get("message_id")
+                    else:
+                        rich_message_id = getattr(rich_result, "message_id", None)
+                    return {
+                        "success": True,
+                        "platform": "telegram",
+                        "chat_id": chat_id,
+                        "message_id": str(rich_message_id) if rich_message_id is not None else "",
+                    }
+                except Exception as rich_error:
+                    logger.warning(
+                        "sendRichMessage failed in _send_telegram, falling back to legacy sendMessage: %s",
+                        _sanitize_error_text(rich_error),
+                    )
+
             # Chunk *after* formatting: MarkdownV2/HTML escaping inflates the
             # text (each escaped char like `!`/`.`/`-` becomes `\!`/`\.`/`\-`),
             # so a message that fit under 4096 UTF-16 units raw can exceed the
