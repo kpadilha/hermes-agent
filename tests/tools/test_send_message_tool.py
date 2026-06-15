@@ -787,7 +787,7 @@ class TestSendToPlatformChunking:
 
         sent_calls = []
 
-        async def fake_send(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False):
+        async def fake_send(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False, rich_messages=False):
             sent_calls.append(media_files or [])
             return {"success": True, "platform": "telegram", "chat_id": chat_id, "message_id": str(len(sent_calls))}
 
@@ -804,6 +804,26 @@ class TestSendToPlatformChunking:
         assert len(sent_calls) >= 3
         assert all(call == [] for call in sent_calls[:-1])
         assert sent_calls[-1] == media
+
+    def test_telegram_rich_messages_extra_passed_to_standalone_sender(self):
+        sent = []
+
+        async def fake_send(token, chat_id, message, **kwargs):
+            sent.append(kwargs)
+            return {"success": True, "platform": "telegram", "chat_id": chat_id, "message_id": "1"}
+
+        with patch("tools.send_message_tool._send_telegram", fake_send):
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.TELEGRAM,
+                    SimpleNamespace(enabled=True, token="tok", extra={"rich_messages": True}),
+                    "123",
+                    "## Sprint\n\n| Task | Status |\n|---|---|\n| Rich | ✅ |",
+                )
+            )
+
+        assert result["success"] is True
+        assert sent and sent[0]["rich_messages"] is True
 
     def test_matrix_media_uses_native_adapter_helper(self, tmp_path):
         doc_path = tmp_path / "test-send-message-matrix.pdf"
@@ -1001,6 +1021,60 @@ class TestSendTelegramHtmlDetection:
 
         kwargs = bot.send_message.await_args.kwargs
         assert kwargs["disable_web_page_preview"] is True
+
+    def test_rich_messages_uses_send_rich_message_with_raw_markdown(self, monkeypatch):
+        bot = self._make_bot()
+        bot.do_api_request = AsyncMock(return_value={"message_id": 42})
+        _install_telegram_mock(monkeypatch, bot)
+
+        result = asyncio.run(
+            _send_telegram(
+                "tok",
+                "123",
+                "## Sprint\n\n| Task | Status |\n|---|---|\n| Rich | ✅ |",
+                rich_messages=True,
+            )
+        )
+
+        assert result["success"] is True
+        assert result["message_id"] == "42"
+        bot.do_api_request.assert_awaited_once()
+        method = bot.do_api_request.await_args.args[0]
+        payload = bot.do_api_request.await_args.kwargs["api_kwargs"]
+        assert method == "sendRichMessage"
+        assert payload["rich_message"]["markdown"].startswith("## Sprint")
+        bot.send_message.assert_not_awaited()
+
+    def test_rich_messages_falls_back_to_legacy_send_message(self, monkeypatch):
+        bot = self._make_bot()
+        bot.do_api_request = AsyncMock(side_effect=Exception("Bad Request: unsupported rich markdown"))
+        _install_telegram_mock(monkeypatch, bot)
+
+        result = asyncio.run(_send_telegram("tok", "123", "plain", rich_messages=True))
+
+        assert result["success"] is True
+        bot.do_api_request.assert_awaited_once()
+        bot.send_message.assert_awaited_once()
+        assert bot.send_message.await_args.kwargs["parse_mode"] == "MarkdownV2"
+
+    def test_rich_messages_disable_link_preview_uses_rich_payload_option(self, monkeypatch):
+        bot = self._make_bot()
+        bot.do_api_request = AsyncMock(return_value={"message_id": 7})
+        _install_telegram_mock(monkeypatch, bot)
+
+        asyncio.run(
+            _send_telegram(
+                "tok",
+                "123",
+                "https://example.com",
+                disable_link_previews=True,
+                rich_messages=True,
+            )
+        )
+
+        payload = bot.do_api_request.await_args.kwargs["api_kwargs"]
+        assert payload["link_preview_options"] == {"is_disabled": True}
+        assert "disable_web_page_preview" not in payload
 
     def test_html_with_code_and_pre_tags(self, monkeypatch):
         bot = self._make_bot()
