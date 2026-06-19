@@ -1369,6 +1369,14 @@ def init_agent(
         _relevance_pinning_cfg.get("max_pin_chars_total", 12000)
     )
     relevance_pinning_min_score = int(_relevance_pinning_cfg.get("min_score", 3))
+    # In-place compaction: when True, compress_context() rewrites the message
+    # list + rebuilds the system prompt WITHOUT rotating the session id (no
+    # parent_session_id chain, no `name #N` renumber). See #38763 and
+    # agent/conversation_compression.py. Consumed by compress_context(), not the
+    # compressor, so it rides on the agent.
+    compression_in_place = str(
+        _compression_cfg.get("in_place", False)
+    ).lower() in {"true", "1", "yes"}
 
     # Read optional explicit context_length override for the auxiliary
     # compression model. Custom endpoints often cannot report this via

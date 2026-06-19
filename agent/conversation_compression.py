@@ -523,6 +523,17 @@ def compress_context(
             # conversation's pre-compaction turns are about to be summarized
             # away regardless of whether the id rotates).
             agent.commit_memory_session(messages)
+            # Flush any un-persisted messages from the current turn *before*
+            # the rewrite.  compress_context() can be called mid-turn
+            # (auto-compress when context exceeds threshold) at a point when
+            # _flush_messages_to_session_db() has not yet run.  Without this,
+            # messages generated during the current turn are silently lost
+            # (#47202). In-place mode flushes to the SAME session; rotation
+            # mode flushes to the old session before ending it.
+            try:
+                agent._flush_messages_to_session_db(messages)
+            except Exception:
+                pass  # best-effort — don't block compression on a flush error
 
             if in_place:
                 # ── In-place compaction: keep the same session_id ──────────
@@ -563,6 +574,23 @@ def compress_context(
                     agent._flush_messages_to_session_db(messages)
                 except Exception:
                     pass  # best-effort — don't block compression on a flush error
+                # Propagate title to the new session with auto-numbering
+                old_title = agent._session_db.get_session_title(agent.session_id)
+                agent._session_db.end_session(agent.session_id, "compression")
+                old_session_id = agent.session_id
+                agent.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+                # Ordering contract: the agent thread updates the contextvar here;
+                # the gateway propagates to SessionEntry after run_in_executor returns.
+                try:
+                # renumber, no contextvar/env/logging re-sync. Just refresh
+                # the stored system prompt on the existing row. The session's
+                # id, title, cwd, /goal, FTS-indexed history, and gateway
+                # routing all stay put. See #38763.
+                agent._session_db.update_system_prompt(
+                    agent.session_id, new_system_prompt
+                )
+            else:
+                # ── Rotation (legacy): end this session, fork a continuation ─
                 # Propagate title to the new session with auto-numbering
                 old_title = agent._session_db.get_session_title(agent.session_id)
                 agent._session_db.end_session(agent.session_id, "compression")
@@ -648,6 +676,14 @@ def compress_context(
                     migrate_goal_to_session(old_session_id, agent.session_id, reason="compression")
                 except Exception as _goal_err:
                     logger.debug("Could not migrate goal on compression: %s", _goal_err)
+                agent._session_db.create_session(
+                    session_id=agent.session_id,
+                    source=agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                    model=agent.model,
+                    model_config=agent._session_init_model_config,
+                    parent_session_id=old_session_id,
+                )
+                agent._session_db_created = True
                 # Auto-number the title for the continuation session
                 if old_title:
                     try:
@@ -662,6 +698,9 @@ def compress_context(
             # next turn re-bases its append diff.
             agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
             agent._last_flushed_db_idx = 0
+                agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
+                # Reset flush cursor — new session starts with no messages written
+                agent._last_flushed_db_idx = 0
         except Exception as e:
             # If the rotation rolled back to the parent (orphan-avoidance
             # above), agent.session_id is the still-indexed parent and
