@@ -203,6 +203,38 @@ function FilesystemTab({
             <Codicon name="collapse-all" size="0.8125rem" />
           </Button>
         </Tip>
+        <Button
+          aria-label={r.refreshTree}
+          className={HEADER_ACTION_LABEL_REVEAL}
+          disabled={!hasCwd || loading}
+          onClick={onRefresh}
+          size="icon-xs"
+          title={r.refreshTree}
+          variant="ghost"
+        >
+          <Codicon name="refresh" size="0.8125rem" spinning={loading} />
+        </Button>
+        <Button
+          aria-label={r.openFolder}
+          className={HEADER_ACTION_CLASS}
+          onClick={() => void onChangeFolder()}
+          size="icon-xs"
+          title={r.openFolder}
+          variant="ghost"
+        >
+          <Codicon name="folder-opened" size="0.8125rem" />
+        </Button>
+        <Button
+          aria-label={r.collapseAll}
+          className={cn(HEADER_ACTION_CLASS, !canCollapse && 'pointer-events-none opacity-0')}
+          disabled={!hasCwd || !canCollapse}
+          onClick={onCollapseAll}
+          size="icon-xs"
+          title={r.collapseAll}
+          variant="ghost"
+        >
+          <Codicon name="collapse-all" size="0.8125rem" />
+        </Button>
       </RightSidebarSectionHeader>
       <FileTreeBody
         collapseNonce={collapseNonce}
