@@ -1907,6 +1907,12 @@ async def get_status(profile: Optional[str] = None):
         # keys off gateway_running (a live PID/health probe), NEVER
         # gateway_updated_at — a healthy idle gateway never advances that.
         active_agents = parse_active_agents((runtime or {}).get("active_agents", 0))
+        active_agents = 0
+        if runtime:
+            try:
+                active_agents = max(0, int(runtime.get("active_agents", 0) or 0))
+            except (TypeError, ValueError):
+                active_agents = 0
         gateway_busy = derive_gateway_busy(
             gateway_running=gateway_running,
             gateway_state=gateway_state,
@@ -1926,6 +1932,19 @@ async def get_status(profile: Optional[str] = None):
         restart_drain_timeout = await asyncio.get_running_loop().run_in_executor(
             None, _resolve_restart_drain_timeout
         )
+        # without out-of-band knowledge.  Mirrors gateway/restart.py precedence:
+        # HERMES_RESTART_DRAIN_TIMEOUT env override → config agent.* → default.
+        from gateway.restart import parse_restart_drain_timeout
+
+        _drain_timeout_raw = os.environ.get("HERMES_RESTART_DRAIN_TIMEOUT")
+        if _drain_timeout_raw is None:
+            try:
+                _drain_timeout_raw = cfg_get(
+                    load_config(), "agent", "restart_drain_timeout", default=None
+                )
+            except Exception:
+                _drain_timeout_raw = None
+        restart_drain_timeout = parse_restart_drain_timeout(_drain_timeout_raw)
 
         # Dashboard auth gate (Phase 7): surface whether the gate is engaged
         # and which providers are registered so ``hermes status`` and the
