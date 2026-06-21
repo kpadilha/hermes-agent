@@ -1590,3 +1590,4 @@ class TestGatewayBusyDerivation:
             assert status.derive_gateway_drainable(
                 gateway_running=True, gateway_state=state
             ) is False, state
+
