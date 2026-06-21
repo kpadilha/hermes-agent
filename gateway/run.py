@@ -3946,6 +3946,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             write_runtime_status(active_agents=self._running_agent_count())
         except Exception:
             pass
+    def _record_recent_turn_lcm_state(self, result: dict | None, *, session_id: str | None = None) -> None:
+        """Persist completed-turn proof/continuity telemetry for health dashboards."""
+        if not isinstance(result, dict):
+            return
+        try:
+            from gateway.status import build_recent_turn_lcm_state, write_runtime_status
+
+            lcm_recent_turn = build_recent_turn_lcm_state(
+                completed=bool(result.get("completed", True)),
+                interrupted=bool(result.get("interrupted", False)),
+                failed=bool(result.get("failed", False)),
+                error=result.get("error"),
+                api_calls=result.get("api_calls"),
+                tools=result.get("tools") if isinstance(result.get("tools"), list) else [],
+                session_id=session_id or result.get("session_id"),
+            )
+            write_runtime_status(lcm_recent_turn=lcm_recent_turn)
+        except Exception:
+            logger.debug("Failed to write recent-turn LCM runtime status", exc_info=True)
 
     def _update_platform_runtime_status(
         self,
