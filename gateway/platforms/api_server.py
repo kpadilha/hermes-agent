@@ -1184,6 +1184,7 @@ class APIServerAdapter(BasePlatformAdapter):
         runtime = read_runtime_status() or {}
         gw_state = runtime.get("gateway_state")
         gw_active = parse_active_agents(runtime.get("active_agents", 0))
+        gw_active = runtime.get("active_agents", 0)
         # This endpoint is served BY the gateway process, so it is by definition
         # alive — gateway_running is True. Derive busy/drainable from the same
         # shared contract /api/status uses so the two surfaces never disagree.
@@ -1207,6 +1208,15 @@ class APIServerAdapter(BasePlatformAdapter):
             "active_agent_sessions": runtime.get("active_agent_sessions", []),
             "activity_status_version": runtime.get("activity_status_version"),
             "activity_changed_at": runtime.get("activity_changed_at"),
+            "gateway_busy": derive_gateway_busy(
+                gateway_running=True,
+                gateway_state=gw_state,
+                active_agents=gw_active,
+            ),
+            "gateway_drainable": derive_gateway_drainable(
+                gateway_running=True,
+                gateway_state=gw_state,
+            ),
             "exit_reason": runtime.get("exit_reason"),
             "updated_at": runtime.get("updated_at"),
             "pid": os.getpid(),
