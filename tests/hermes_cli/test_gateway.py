@@ -161,6 +161,7 @@ def test_build_architecture_dashboard_does_not_require_recent_turn_proof_mid_tur
     architecture dashboard before the turn had a chance to complete and emit a
     recent-turn scorecard.
     """
+def test_build_architecture_dashboard_marks_lcm_proves_unknown_when_required_proof_is_missing():
     dashboard = gateway._build_architecture_dashboard(
         runtime_state={
             "active_agents": 1,
@@ -243,6 +244,8 @@ def test_build_architecture_dashboard_ignores_interrupted_turn_while_session_res
     assert dashboard["hermes_acts"]["status"] == "ok"
     assert dashboard["lcm_proves"]["status"] == "ok"
     assert dashboard["overall"]["status"] == "ok"
+    assert dashboard["lcm_proves"]["status"] == "unknown"
+    assert dashboard["overall"]["status"] == "unknown"
 
 
 def test_build_architecture_dashboard_ignores_runtime_health_without_matching_workflow():
