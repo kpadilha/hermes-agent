@@ -631,6 +631,7 @@ export interface ComputerUseStatus {
   error: string | null
 }
 
+
 export interface SessionSearchResult {
   /** Lineage root of the matched conversation. Stable across compression and
    *  used as the durable pin id; falls back to session_id when absent. */
