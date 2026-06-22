@@ -800,6 +800,7 @@ class ContextCompressor(ContextEngine):
         relevance_pinning_max_pins: int = 8,
         relevance_pinning_max_chars_total: int = 12000,
         relevance_pinning_min_score: int = 3,
+        max_tokens: int | None = None,
     ):
         self.model = model
         self.base_url = base_url
