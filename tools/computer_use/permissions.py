@@ -182,6 +182,7 @@ def request_permissions_grant(driver_cmd: Optional[str] = None) -> int:
                 stdin=subprocess.DEVNULL,
             ).returncode
         )
+        return int(subprocess.run([binary, "permissions", "grant"], env=_child_env()).returncode)
     except KeyboardInterrupt:  # pragma: no cover - interactive
         return 130
     except Exception as exc:  # pragma: no cover - defensive
