@@ -12722,6 +12722,7 @@ def main():
                 sys.exit(0 if st["ready"] else 1)
             computer_use_perms.print_help()
             return
+
         # No subcommand → show help
         computer_use_parser.print_help()
 
