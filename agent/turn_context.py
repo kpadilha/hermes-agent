@@ -401,14 +401,32 @@ def build_turn_context(
     # Built-in deterministic active-topic continuity context. This is injected
     # into the current user message at API-call time via plugin_user_context,
     # not into the cached system prompt and not into persisted messages.
+    # The resolver preserves cross-session continuity by design, but enforces
+    # an evidence gate: the current user message must contribute topical
+    # tokens to the resolved project (not just a continuation regex match).
     active_topic_context = ""
     try:
         from agent.active_topic_resolver import build_active_topic_context
+
+        # Tunable via config.yaml agent.active_topic.{min_confidence, min_topic_evidence}.
+        # Defaults live in agent.active_topic_resolver for back-compat.
+        _atc_kwargs: dict[str, Any] = {}
+        try:
+            _agent_cfg = getattr(agent, "_config", None) or {}
+            _atc_cfg = _agent_cfg.get("agent", {}).get("active_topic") if isinstance(_agent_cfg, dict) else None
+        except Exception:
+            _atc_cfg = None
+        if isinstance(_atc_cfg, dict):
+            if "min_confidence" in _atc_cfg:
+                _atc_kwargs["min_confidence"] = float(_atc_cfg["min_confidence"])
+            if "min_topic_evidence" in _atc_cfg:
+                _atc_kwargs["min_topic_evidence"] = int(_atc_cfg["min_topic_evidence"])
 
         active_topic_context = build_active_topic_context(
             original_user_message,
             conversation_history,
             agent=agent,
+            **_atc_kwargs,
         )
         if active_topic_context:
             logger.info(
