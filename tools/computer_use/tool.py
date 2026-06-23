@@ -1,6 +1,7 @@
 """Entry point for the `computer_use` tool.
 
 Universal (any-model) desktop control across macOS, Windows, and Linux via
+Universal (any-model) desktop control across macOS + Windows via
 cua-driver's background computer-use primitive. Replaces #4562's
 Anthropic-native `computer_20251124` approach — the schema here is standard
 OpenAI function-calling so every tool-capable model can drive it.
@@ -10,6 +11,8 @@ AT-SPI tree path); it is enabled here alongside macOS and Windows. When a
 host's display server or accessibility stack isn't reachable, cua-driver's
 `health_report` (surfaced by `hermes computer-use doctor`) reports the
 exact blocked check rather than the toolset silently failing.
+Linux support exists in cua-driver-rs (alpha — PARITY rows are mostly
+OPEN today, not VERIFIED) and is gated off here until it flips upstream.
 
 Return contract
 ---------------

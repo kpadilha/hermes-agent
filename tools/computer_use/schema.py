@@ -79,6 +79,9 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
                     "capture is per-window; a single image cannot span "
                     "multiple monitors, so on a multi-screen setup capture "
                     "one window or display at a time."
+                    "(by name, e.g. 'Safari' or 'Notepad', or bundle ID "
+                    "where the platform supports it). If omitted, operates "
+                    "on the frontmost app's window or the whole screen."
                 ),
             },
             "max_elements": {
