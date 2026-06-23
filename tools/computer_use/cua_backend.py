@@ -1,4 +1,5 @@
 """Cua-driver backend (macOS, Windows, Linux).
+"""Cua-driver backend (macOS + Windows).
 
 Speaks MCP over stdio to `cua-driver`. The Python `mcp` SDK is async, so we
 run a dedicated asyncio event loop on a background thread and marshal sync
@@ -16,6 +17,14 @@ Wayland progress tracked upstream). It is enabled in
 in this file is OS-agnostic; per-host gaps (no DISPLAY, missing AT-SPI,
 etc.) surface as specific blocked checks via `hermes computer-use doctor`
 rather than failing silently.
+move_cursor, wait) works identically across macOS + Windows — cua-driver's
+PARITY matrix marks every action tool VERIFIED on Windows in the
+cross-platform Rust port (`cua-driver-rs`).
+
+Linux support exists in cua-driver-rs but is alpha today — Linux PARITY
+rows are mostly OPEN, not VERIFIED — so it's gated off in
+`check_computer_use_requirements` until that flips upstream. The plumbing
+in this file is OS-agnostic, so flipping that gate later is one-line.
 
 Install:
   - **macOS**:
@@ -99,6 +108,54 @@ _DESKTOP_WINDOW_NAMES = (
     "shell_traywnd", "taskbar",               # Windows taskbar
     "finder", "desktop", "dock",              # macOS desktop / shell
 )
+
+def _resolve_mcp_invocation(
+    driver_cmd: str,
+    *,
+    timeout: float = 6.0,
+) -> Tuple[str, List[str]]:
+    """Return ``(command, args)`` that spawn cua-driver's stdio MCP server.
+
+    Surface 8 of NousResearch/hermes-agent#47072: instead of hardcoding
+    ``["mcp"]`` we ask the driver itself via ``cua-driver manifest``
+    (trycua/cua#1961). The manifest carries a stable ``mcp_invocation``
+    pointer with both ``command`` and ``args``, so a future cua-driver
+    that renames or relocates the subcommand keeps working without a
+    Hermes patch.
+
+    Falls back to ``(driver_cmd, ["mcp"])`` for older drivers that don't
+    expose ``manifest``, or any indeterminate failure — the wrapper must
+    not refuse to start just because the discovery hop failed.
+    """
+    try:
+        proc = subprocess.run(
+            [driver_cmd, "manifest"],
+            capture_output=True, text=True, timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except Exception:
+        return driver_cmd, list(_CUA_DRIVER_ARGS)
+    out = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not out:
+        return driver_cmd, list(_CUA_DRIVER_ARGS)
+    try:
+        manifest = json.loads(out)
+    except (ValueError, TypeError):
+        return driver_cmd, list(_CUA_DRIVER_ARGS)
+    if not isinstance(manifest, dict):
+        return driver_cmd, list(_CUA_DRIVER_ARGS)
+    invocation = manifest.get("mcp_invocation")
+    if not isinstance(invocation, dict):
+        return driver_cmd, list(_CUA_DRIVER_ARGS)
+    args = invocation.get("args")
+    command = invocation.get("command")
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        return driver_cmd, list(_CUA_DRIVER_ARGS)
+    if not isinstance(command, str) or not command:
+        # The driver knows the subcommand but didn't surface its own path.
+        # Keep our resolved driver_cmd; the args are still authoritative.
+        return driver_cmd, args
+    return command, args
 
 
 # Env var cua-driver reads to gate its anonymous usage telemetry (PostHog).
@@ -589,6 +646,7 @@ class _CuaDriverSession:
                 # Apply the telemetry policy first (default: disabled), then
                 # sanitize Hermes-managed secrets out of the child env.
                 env=_sanitize_subprocess_env(cua_driver_child_env()),
+                env=_sanitize_subprocess_env(dict(os.environ)),
             )
 
             async with stdio_client(params) as (read, write):
@@ -1176,6 +1234,23 @@ class CuaDriverBackend(ComputerUseBackend):
                 wt = re.search(r'AXWindow\s+"([^"]+)"', tree)
                 if wt:
                     window_title = wt.group(1)
+            # screenshot tool: just the PNG, no AX walk.
+            sc_out = self._session.call_tool(
+                "screenshot",
+                {
+                    "window_id": self._active_window_id,
+                    "format": "jpeg",
+                    "quality": 85,
+                    "session": self._session_id,
+                },
+            )
+            if sc_out["images"]:
+                png_b64 = sc_out["images"][0]
+                # Pick up the explicit mimeType cua-driver attaches to image
+                # parts (Surface 7). Empty string means the driver didn't
+                # carry one — callers will fall back to magic-byte sniffing.
+                mimes = sc_out.get("image_mime_types") or []
+                image_mime_type = mimes[0] if mimes and mimes[0] else None
         else:
             # get_window_state: AX tree + screenshot.
             gws_out = self._session.call_tool(
@@ -1218,6 +1293,10 @@ class CuaDriverBackend(ComputerUseBackend):
             # structuredContent (screenshot_png_b64) depending on the driver
             # build — _image_from_tool_result handles both.
             png_b64, image_mime_type = _image_from_tool_result(gws_out)
+            if gws_out["images"]:
+                png_b64 = gws_out["images"][0]
+                mimes = gws_out.get("image_mime_types") or []
+                image_mime_type = mimes[0] if mimes and mimes[0] else None
 
             # Extract window title from the AX tree first AXWindow line.
             wt = re.search(r'AXWindow\s+"([^"]+)"', tree)

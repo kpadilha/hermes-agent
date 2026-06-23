@@ -520,6 +520,9 @@ TOOL_CATEGORIES = {
         "icon": "🖱️",
         # Runtime backends ship for macOS, Windows, and Linux (X11 today,
         # Wayland via XWayland). Per-host gaps surface via `computer-use doctor`.
+        "name": "Computer Use (macOS/Windows)",
+        "icon": "🖱️",
+        # Runtime backends ship for macOS + Windows today; Linux is alpha.
         "platform_gate": ["darwin", "win32", "linux"],
         "providers": [
             {
@@ -692,6 +695,74 @@ def _pip_install(
 # `cua-driver check-update --json`) gives us the canonical update
 # answer from the binary itself — same tag-resolution as the installer,
 # no Python-side duplication.
+def _check_cua_driver_asset_for_arch() -> bool:
+    """Check whether the latest CUA release ships an asset for this OS+arch.
+
+    Returns True if the asset likely exists (or if we cannot determine it).
+    Returns False and prints a warning when the asset is confirmed missing,
+    so callers can skip the install attempt and avoid a raw 404.
+
+    Recognizes release-asset names across all supported platforms:
+
+    * macOS (``Darwin``)  — arm64 always ships; x86_64/amd64 probed.
+    * Windows (``AMD64``/``ARM64``) — amd64/x86_64 and arm64 probed.
+    * Linux (``x86_64``/``aarch64``) — x86_64/amd64 and aarch64/arm64 probed.
+    """
+    import platform as _plat
+    import urllib.request
+
+    system = _plat.system()
+    machine = _plat.machine().lower()  # e.g. "x86_64", "arm64", "amd64", "aarch64"
+
+    # arm64 (Apple Silicon) macOS assets are always published — short-circuit
+    # to preserve the original fail-open behaviour and avoid a network call.
+    if system == "Darwin" and machine == "arm64":
+        return True
+
+    # Map this host's arch to the set of asset-name substrings we'll accept.
+    # Asset names vary by OS (darwin-x86_64, windows-amd64, linux-aarch64, …),
+    # so we match on the architecture token only and let any of the common
+    # aliases satisfy the probe.
+    if machine in {"x86_64", "amd64", "x64"}:
+        arch_names = {"x86_64", "amd64", "x64"}
+        arch_label = "x86_64/amd64"
+    elif machine in {"arm64", "aarch64"}:
+        arch_names = {"arm64", "aarch64"}
+        arch_label = "arm64/aarch64"
+    else:
+        # Unknown arch — fail open and let the installer surface the error.
+        return True
+
+    # Probe the latest release for an OS+arch asset before falling through to
+    # the upstream installer.
+    api_url = (
+        "https://api.github.com/repos/trycua/cua/releases/latest"
+    )
+    try:
+        req = urllib.request.Request(api_url, headers={"Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            release = _json.loads(resp.read().decode())
+        tag = release.get("tag_name", "")
+        assets = release.get("assets", [])
+        has_asset = any(
+            any(a in a_info.get("name", "").lower() for a in arch_names)
+            for a_info in assets
+        )
+        if not has_asset:
+            _print_warning(
+                f"    Latest CUA release ({tag}) has no {system} {arch_label} asset."
+            )
+            _print_info(
+                "    CUA Driver may not yet ship a build for this platform."
+            )
+            _print_info(
+                "    See: https://github.com/trycua/cua/releases"
+            )
+            return False
+    except Exception:
+        # Network / API failure — proceed and let the installer handle it.
+        pass
+    return True
 
 
 def install_cua_driver(upgrade: bool = False) -> bool:
@@ -793,6 +864,23 @@ def install_cua_driver(upgrade: bool = False) -> bool:
         except Exception:
             pass
 
+    # Skip the (network) re-install when the driver itself reports it's already
+    # on the latest release. Best-effort: an older driver (no check-update
+    # verb) or an offline check returns None, in which case we fall through and
+    # re-run the installer as before.
+    if binary:
+        try:
+            from tools.computer_use.cua_backend import cua_driver_update_check
+            _state = cua_driver_update_check()
+            if _state is not None and not _state.get("update_available"):
+                _print_success(
+                    f"    {driver_cmd} is already on the latest release "
+                    f"({_state.get('current_version') or 'unknown'})."
+                )
+                return True
+        except Exception:
+            pass
+
     if binary:
         # Show before/after version when we have a baseline. Best-effort.
         try:
@@ -870,6 +958,7 @@ def _run_cua_driver_installer(label: str = "Installing", verbose: bool = True) -
     driver_cmd = _cua_driver_cmd()
     try:
         result = subprocess.run(install_cmd, shell=use_shell, timeout=300, env=_cua_driver_env())
+        result = subprocess.run(install_cmd, shell=use_shell, timeout=300)
         if result.returncode == 0 and shutil.which(driver_cmd):
             if verbose:
                 _print_success(f"    {driver_cmd} installed.")
