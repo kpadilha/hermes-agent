@@ -51,6 +51,26 @@ _PROJECT_ROOTS_ENV = "HERMES_ACTIVE_TOPIC_PROJECT_ROOTS"
 _MAX_PROJECTS = 80
 _MAX_CONTEXT_CHARS = 1800
 
+# Evidence gate: the resolver must observe at least this many topical tokens
+# contributed by the *current* user message (not history) before accepting a
+# project. Cross-session hint is preserved as a soft signal (+2.0) but cannot
+# alone unlock a packet. This is the structural fix for the leak where a
+# structurally-typed continuation ("1. Discord / 2. ... / 3. causa raiz")
+# picked up a stale project whose tokens lived only in the assistant's prior
+# turn.
+_MIN_TOPIC_EVIDENCE_TOKENS = 2
+
+# Hint weight reduced from +8.0 (decisive) to +2.0 (supportive). Cross-session
+# continuity is preserved by design but no longer dominates the score.
+_SESSION_HINT_WEIGHT = 2.0
+
+# Default confidence threshold raised from 0.45 to 0.50. Tunable via
+# agent.active_topic.min_confidence in config.yaml. Tunable without code edit.
+# 0.50 was chosen empirically against the live vault: it filters the leak
+# class (structural continuation with 0.50-0.55 confidence) while leaving
+# genuine cross-session continuity (0.60-0.85) untouched.
+_DEFAULT_MIN_CONFIDENCE = 0.50
+
 
 @dataclass(frozen=True)
 class ProjectContext:
@@ -117,10 +137,28 @@ def is_continuation_like(message: Any) -> bool:
 
 
 def _tokenize(text: str) -> set[str]:
+    # normalize_text() applies NFKD + strips combining marks so accented
+    # Portuguese/European tokens ("negocio", "implementar", "ensinar") match
+    # project text that may carry accented forms ("negócio", "implementação").
+    # Without this the evidence gate fails on Portuguese project files.
     return {
         w for w in re.findall(r"[a-z0-9_]{3,}", normalize_text(text))
         if w not in _STOPWORDS
     }
+
+
+def _message_topic_tokens(user_message: Any) -> set[str]:
+    """Topical tokens from the *current* user message only.
+
+    Returns meaningful, non-stopword tokens. The evidence gate uses this set
+    to enforce that the user actually said something about the resolved
+    project's topic in this turn, not just hit a continuation regex.
+    """
+    if isinstance(user_message, Mapping):
+        text = _message_text(user_message)
+    else:
+        text = str(user_message or "")
+    return _tokenize(text)
 
 
 def _message_text(message: Mapping[str, Any]) -> str:
@@ -274,7 +312,13 @@ def _session_hint_slugs(agent: Any, seed_text: str) -> set[str]:
     return slugs
 
 
-def score_project(project: ProjectContext, seed_text: str, hinted_slugs: set[str] | None = None) -> tuple[float, str]:
+def score_project(
+    project: ProjectContext,
+    seed_text: str,
+    *,
+    message_tokens: set[str] | None = None,
+    hinted_slugs: set[str] | None = None,
+) -> tuple[float, str]:
     seed_tokens = _tokenize(seed_text)
     project_tokens = _tokenize(project.text)
     if not seed_tokens:
@@ -299,9 +343,13 @@ def score_project(project: ProjectContext, seed_text: str, hinted_slugs: set[str
         if phrase in norm_seed and phrase in norm_project:
             score += weight
             reasons.append(f"phrase '{phrase}'")
+    # Cross-session hint: preserved as a soft signal (was +8.0, now +2.0).
+    # Continuity feature is intact; the signal is no longer decisive on its
+    # own. The evidence gate in resolve_active_topic() enforces that the user
+    # actually said something about the topic this turn.
     if project.slug in (hinted_slugs or set()):
-        score += 8.0
-        reasons.append("session-search hinted slug")
+        score += _SESSION_HINT_WEIGHT
+        reasons.append(f"session-search hinted slug (+{_SESSION_HINT_WEIGHT})")
     # Avoid letting global/high-priority projects win when a local business/SMB
     # project has explicit overlap. This is not a hard-coded block; it only
     # penalizes unrelated Agentic/Machine Identity contexts for business-SMB seeds.
@@ -309,6 +357,13 @@ def score_project(project: ProjectContext, seed_text: str, hinted_slugs: set[str
         if any(term in normalize_text(project.slug + " " + project.title) for term in ("identity", "agentic", "machine-identity")):
             score -= 3.0
             reasons.append("penalty: global identity topic conflicts with business-SMB seed")
+    # Track how much of the overlap comes from the current message vs history,
+    # for the evidence gate.
+    if message_tokens is not None and overlap:
+        message_overlap = message_tokens & project_tokens
+        reasons.append(
+            f"message-evidence: {len(message_overlap)} token(s) in current turn"
+        )
     return max(score, 0.0), "; ".join(reasons) or "weak lexical match"
 
 
@@ -356,18 +411,30 @@ def resolve_active_topic(
     *,
     agent: Any = None,
     project_roots: Iterable[Path] | None = None,
-    min_confidence: float = 0.45,
+    min_confidence: float | None = None,
+    min_topic_evidence: int | None = None,
+    logger: Any = None,
 ) -> ActiveTopicPacket | None:
+    if min_confidence is None:
+        min_confidence = _DEFAULT_MIN_CONFIDENCE
+    if min_topic_evidence is None:
+        min_topic_evidence = _MIN_TOPIC_EVIDENCE_TOKENS
     if not is_continuation_like(user_message):
         return None
     seed_text = build_seed_text(user_message, conversation_history, agent=agent)
     projects = load_project_contexts(project_roots)
     if not projects:
         return None
+    message_tokens = _message_topic_tokens(user_message)
     hinted_slugs = _session_hint_slugs(agent, seed_text)
     scored = []
     for project in projects:
-        score, why = score_project(project, seed_text, hinted_slugs)
+        score, why = score_project(
+            project,
+            seed_text,
+            message_tokens=message_tokens,
+            hinted_slugs=hinted_slugs,
+        )
         scored.append((score, project, why))
     scored.sort(key=lambda item: item[0], reverse=True)
     best_score, best, why = scored[0]
@@ -375,8 +442,61 @@ def resolve_active_topic(
         return None
     runner_up = scored[1][0] if len(scored) > 1 else 0.0
     confidence = min(0.95, best_score / (best_score + runner_up + 2.0))
-    if confidence < min_confidence:
+    # Evidence gate: the current user message must contribute at least
+    # `min_topic_evidence` topical tokens that overlap with the best project.
+    # Cross-session hint is supportive but cannot alone unlock a packet.
+    # Structural turns ("1, 2, 3", "ok", "Discord, Telegram, CLI") score 0 here.
+    message_overlap_count = len(message_tokens & _tokenize(best.text))
+    if message_overlap_count < min_topic_evidence:
+        if logger is not None:
+            try:
+                logger.info(
+                    "active_topic_resolver: evidence-gate reject slug=%s "
+                    "session=%s platform=%s message_overlap=%d required=%d "
+                    "best_score=%.2f confidence=%.2f",
+                    best.slug,
+                    getattr(agent, "session_id", None) or "none",
+                    getattr(agent, "platform", None) or "",
+                    message_overlap_count,
+                    min_topic_evidence,
+                    best_score,
+                    confidence,
+                )
+            except Exception:
+                pass
         return None
+    if confidence < min_confidence:
+        if logger is not None:
+            try:
+                logger.info(
+                    "active_topic_resolver: confidence-gate reject slug=%s "
+                    "session=%s platform=%s confidence=%.2f threshold=%.2f",
+                    best.slug,
+                    getattr(agent, "session_id", None) or "none",
+                    getattr(agent, "platform", None) or "",
+                    confidence,
+                    min_confidence,
+                )
+            except Exception:
+                pass
+        return None
+    # Accepted — emit structured log so future debugging has a real trail.
+    if logger is not None:
+        try:
+            logger.info(
+                "active_topic_resolver: accepted slug=%s session=%s platform=%s "
+                "confidence=%.2f best_score=%.2f message_overlap=%d "
+                "hinted=%s",
+                best.slug,
+                getattr(agent, "session_id", None) or "none",
+                getattr(agent, "platform", None) or "",
+                confidence,
+                best_score,
+                message_overlap_count,
+                ",".join(sorted(hinted_slugs)) if hinted_slugs else "",
+            )
+        except Exception:
+            pass
     current_open_loop = "Continue from the resolved project context; if proposing next focus areas, stay inside this project boundary."
     instructions = [
         "Resolve this continuation to the named project before answering.",
