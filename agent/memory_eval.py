@@ -54,9 +54,9 @@ class KrishnaMemoryEval:
             ),
             MemoryEvalCheck(
                 id="profile_source_of_truth",
-                question="Does memory preserve USER.md as authoritative profile source and Honcho as projection?",
-                surface="MEMORY.md",
-                path=self.hermes_home / "memories" / "MEMORY.md",
+                question="Does the memory architecture note preserve USER.md as authoritative profile source and Honcho as projection?",
+                surface="KB hermes-memory-architecture",
+                path=self.kb_root / "wiki" / "operations" / "hermes-memory-architecture.md",
                 must_include_any=("USER.md",),
                 must_include_all=("Honcho", "projection"),
             ),
