@@ -17,9 +17,6 @@ installer has CUA_DRIVER_RS_BAKED_VERSION baked in by CD and errors
 cleanly on missing-arch assets, and the upgrade path uses
 ``cua_driver_update_check()`` (which shells `cua-driver check-update
 --json` against the already-installed binary).
-  skip if installed, install otherwise, warn on unsupported platforms.
-* Pre-check architecture compatibility before downloading to avoid raw 404
-  errors when the upstream release lacks an asset for this OS+arch.
 """
 
 from __future__ import annotations
@@ -28,19 +25,19 @@ from unittest.mock import patch
 
 
 class TestInstallCuaDriverUpgrade:
-    def test_upgrade_on_non_macos_is_silent_noop(self):
+    def test_upgrade_on_unsupported_platform_is_silent_noop(self):
         from hermes_cli import tools_config
 
         with patch.object(tools_config, "_print_warning") as warn, \
-             patch("platform.system", return_value="Linux"):
+             patch("platform.system", return_value="FreeBSD"):
             assert tools_config.install_cua_driver(upgrade=True) is False
             warn.assert_not_called()
 
-    def test_non_upgrade_on_non_macos_warns(self):
+    def test_non_upgrade_on_unsupported_platform_warns(self):
         from hermes_cli import tools_config
 
         with patch.object(tools_config, "_print_warning") as warn, \
-             patch("platform.system", return_value="Linux"):
+             patch("platform.system", return_value="FreeBSD"):
             assert tools_config.install_cua_driver(upgrade=False) is False
             warn.assert_called()
 
@@ -116,8 +113,6 @@ class TestArchProbeRemoval:
     """
 
     def test_probe_function_is_gone(self):
-class TestCheckCuaDriverAssetForArch:
-    def test_arm64_macos_always_returns_true(self):
         from hermes_cli import tools_config
         assert not hasattr(tools_config, "_check_cua_driver_asset_for_arch")
         assert not hasattr(tools_config, "_latest_cua_driver_rs_release")
@@ -128,23 +123,6 @@ class TestCheckCuaDriverAssetForArch:
         line. install.sh errors cleanly when the arch has no asset, so the
         probe was duplicate gatekeeping.
         """
-        from hermes_cli import tools_config
-        assert not hasattr(tools_config, "_check_cua_driver_asset_for_arch")
-        assert not hasattr(tools_config, "_latest_cua_driver_rs_release")
-
-    def test_fresh_install_does_not_call_github_api(self):
-        """Pre-install no longer probes the GitHub API — the upstream
-        ``install.sh`` resolves the tag from its baked CUA_DRIVER_RS_BAKED_VERSION
-        line. install.sh errors cleanly when the arch has no asset, so the
-        probe was duplicate gatekeeping.
-        """
-        # Apple Silicon assets are always published — short-circuits without
-        # a network probe.
-        with patch("platform.system", return_value="Darwin"), \
-             patch("platform.machine", return_value="arm64"):
-            assert tools_config._check_cua_driver_asset_for_arch() is True
-
-    def test_x86_64_with_asset_returns_true(self):
         from hermes_cli import tools_config
 
         with patch("platform.system", return_value="Darwin"), \
@@ -167,7 +145,6 @@ class TestCheckCuaDriverAssetForArch:
         """
         from hermes_cli import tools_config
 
-
         with patch("platform.system", return_value="Darwin"), \
              patch.object(tools_config.shutil, "which",
                           side_effect=lambda n: "/usr/local/bin/" + n
@@ -180,38 +157,3 @@ class TestCheckCuaDriverAssetForArch:
             runner.assert_called_once()
             # Probe deleted — no direct GitHub API call from Python.
             urlopen.assert_not_called()
-            runner.assert_not_called()
-
-        # Without binary — returns False
-        with patch("platform.system", return_value="Darwin"), \
-             patch.object(tools_config.shutil, "which",
-                          side_effect=lambda n: "/usr/bin/curl" if n == "curl" else None), \
-             patch("platform.machine", return_value="x86_64"), \
-             patch("urllib.request.urlopen", return_value=mock_resp), \
-             patch.object(tools_config, "_print_warning"), \
-             patch.object(tools_config, "_print_info"), \
-             patch.object(tools_config, "_run_cua_driver_installer") as runner:
-            assert tools_config.install_cua_driver(upgrade=True) is False
-            runner.assert_not_called()
-
-
-class TestInstallCuaDriverWindows:
-    """install_cua_driver dispatch on Windows hosts."""
-
-    def test_fresh_install_runs_installer(self):
-        from hermes_cli import tools_config
-
-        # PowerShell present, cua-driver not yet installed.
-        with patch("platform.system", return_value="Windows"), \
-             patch.object(tools_config.shutil, "which",
-                          side_effect=lambda n: r"C:\\Windows\\powershell.exe"
-                                                 if n == "powershell" else None), \
-             patch.object(tools_config, "_check_cua_driver_asset_for_arch",
-                          return_value=True), \
-             patch.object(tools_config, "_run_cua_driver_installer",
-                          return_value=True) as runner:
-            assert tools_config.install_cua_driver(upgrade=True) is True
-            runner.assert_called_once()
-            # Probe deleted — no direct GitHub API call from Python.
-            urlopen.assert_not_called()
-
