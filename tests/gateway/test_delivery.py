@@ -406,7 +406,6 @@ async def test_save_failure_during_truncation_raises_for_non_chunking_adapter(tm
     adapter = NonChunkingAdapter()
     router = DeliveryRouter(GatewayConfig(), adapters={Platform.DISCORD: adapter})
     target = DeliveryTarget.parse("discord:123")
-
     long_content = "x" * 5000
 
     def failing_save(content, job_id):
@@ -414,9 +413,6 @@ async def test_save_failure_during_truncation_raises_for_non_chunking_adapter(tm
 
     monkeypatch.setattr(router, "_save_full_output", failing_save)
 
-    # Non-chunking adapter must truncate → needs a valid saved path → the
-    # Step 1 best-effort catch swallows the first attempt, but the Step 2
-    # retry (footer needs the path) re-raises.
     with pytest.raises(OSError, match="No space left on device"):
         await router._deliver_to_platform(target, long_content, metadata={"job_id": "job7"})
 
