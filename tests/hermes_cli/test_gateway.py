@@ -244,8 +244,6 @@ def test_build_architecture_dashboard_ignores_interrupted_turn_while_session_res
     assert dashboard["hermes_acts"]["status"] == "ok"
     assert dashboard["lcm_proves"]["status"] == "ok"
     assert dashboard["overall"]["status"] == "ok"
-    assert dashboard["lcm_proves"]["status"] == "unknown"
-    assert dashboard["overall"]["status"] == "unknown"
 
 
 def test_build_architecture_dashboard_ignores_runtime_health_without_matching_workflow():

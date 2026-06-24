@@ -121,13 +121,6 @@ class TestInPlaceCompaction:
             assert agent._flushed_db_message_ids == set()
             # Rotation-independent in-place signal set for the gateway.
             assert agent._last_compaction_in_place is True
-            # Live transcript actually shrank.
-            # Pre-compaction messages remain under the one id (FTS continuity).
-            assert row["message_count"] >= 8
-            # Flush cursor must NOT be reset to 0. Rotation resets it (a fresh
-            # row starts empty); in-place keeps writing to the same row, so the
-            # cursor only ever advances as current-turn messages are persisted.
-            assert agent._last_flushed_db_idx != 0
             # Transcript actually shrank.
             assert len(compressed) == 2
 

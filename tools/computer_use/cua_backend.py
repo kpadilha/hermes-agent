@@ -1,5 +1,4 @@
 """Cua-driver backend (macOS, Windows, Linux).
-"""Cua-driver backend (macOS + Windows).
 
 Speaks MCP over stdio to `cua-driver`. The Python `mcp` SDK is async, so we
 run a dedicated asyncio event loop on a background thread and marshal sync
@@ -17,14 +16,6 @@ Wayland progress tracked upstream). It is enabled in
 in this file is OS-agnostic; per-host gaps (no DISPLAY, missing AT-SPI,
 etc.) surface as specific blocked checks via `hermes computer-use doctor`
 rather than failing silently.
-move_cursor, wait) works identically across macOS + Windows — cua-driver's
-PARITY matrix marks every action tool VERIFIED on Windows in the
-cross-platform Rust port (`cua-driver-rs`).
-
-Linux support exists in cua-driver-rs but is alpha today — Linux PARITY
-rows are mostly OPEN, not VERIFIED — so it's gated off in
-`check_computer_use_requirements` until that flips upstream. The plumbing
-in this file is OS-agnostic, so flipping that gate later is one-line.
 
 Install:
   - **macOS**:
@@ -646,7 +637,6 @@ class _CuaDriverSession:
                 # Apply the telemetry policy first (default: disabled), then
                 # sanitize Hermes-managed secrets out of the child env.
                 env=_sanitize_subprocess_env(cua_driver_child_env()),
-                env=_sanitize_subprocess_env(dict(os.environ)),
             )
 
             async with stdio_client(params) as (read, write):
@@ -1234,23 +1224,6 @@ class CuaDriverBackend(ComputerUseBackend):
                 wt = re.search(r'AXWindow\s+"([^"]+)"', tree)
                 if wt:
                     window_title = wt.group(1)
-            # screenshot tool: just the PNG, no AX walk.
-            sc_out = self._session.call_tool(
-                "screenshot",
-                {
-                    "window_id": self._active_window_id,
-                    "format": "jpeg",
-                    "quality": 85,
-                    "session": self._session_id,
-                },
-            )
-            if sc_out["images"]:
-                png_b64 = sc_out["images"][0]
-                # Pick up the explicit mimeType cua-driver attaches to image
-                # parts (Surface 7). Empty string means the driver didn't
-                # carry one — callers will fall back to magic-byte sniffing.
-                mimes = sc_out.get("image_mime_types") or []
-                image_mime_type = mimes[0] if mimes and mimes[0] else None
         else:
             # get_window_state: AX tree + screenshot.
             gws_out = self._session.call_tool(

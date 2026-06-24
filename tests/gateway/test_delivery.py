@@ -448,19 +448,10 @@ async def test_save_failure_during_truncation_raises_for_non_chunking_adapter(tm
     path. If the save fails there, that is a real delivery problem and the
     error propagates (not swallowed like the chunking best-effort save)."""
     monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
-async def test_audit_save_failure_does_not_break_non_chunking_delivery(tmp_path, monkeypatch):
-    """If the audit save fails AND truncation is needed, the fallback save
-    in Step 2 is NOT caught — the footer needs a valid path, so this is a
-    real failure. But if content exceeds the audit threshold AND truncation
-    is disabled (max_output=0), the caught Step 1 failure lets delivery
-    proceed."""
-    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
-    monkeypatch.setenv("HERMES_DELIVERY_MAX_PLATFORM_OUTPUT", "0")
 
     adapter = NonChunkingAdapter()
     router = DeliveryRouter(GatewayConfig(), adapters={Platform.DISCORD: adapter})
     target = DeliveryTarget.parse("discord:123")
-
     long_content = "x" * 5000
 
     def failing_save(content, job_id):
@@ -468,15 +459,26 @@ async def test_audit_save_failure_does_not_break_non_chunking_delivery(tmp_path,
 
     monkeypatch.setattr(router, "_save_full_output", failing_save)
 
-    # Non-chunking adapter must truncate → needs a valid saved path → the
-    # Step 1 best-effort catch swallows the first attempt, but the Step 2
-    # retry (footer needs the path) re-raises.
     with pytest.raises(OSError, match="No space left on device"):
         await router._deliver_to_platform(target, long_content, metadata={"job_id": "job7"})
 
 
-    # max_output=0 → no truncation → Step 1 failure is caught → delivery proceeds
-    await router._deliver_to_platform(target, long_content, metadata={"job_id": "job7"})
+@pytest.mark.asyncio
+async def test_audit_save_failure_does_not_break_non_chunking_delivery(tmp_path, monkeypatch):
+    """If audit save fails but truncation is disabled, delivery proceeds."""
+    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_DELIVERY_MAX_PLATFORM_OUTPUT", "0")
 
-    # Non-chunking adapter still got the full content (truncation disabled)
+    adapter = NonChunkingAdapter()
+    router = DeliveryRouter(GatewayConfig(), adapters={Platform.DISCORD: adapter})
+    target = DeliveryTarget.parse("discord:123")
+    long_content = "x" * 5000
+
+    def failing_save(content, job_id):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(router, "_save_full_output", failing_save)
+
+    await router._deliver_to_platform(target, long_content, metadata={"job_id": "job8"})
+
     assert adapter.calls[0]["content"] == long_content
