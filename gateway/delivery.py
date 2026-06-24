@@ -27,8 +27,23 @@ logger = logging.getLogger(__name__)
 # entirely — the adapter chunks in its own send() and the full output is
 # preserved.
 MAX_PLATFORM_OUTPUT = 4000
-MAX_PLATFORM_OUTPUT = 24000
-TRUNCATED_VISIBLE = 23600
+AUDIT_SAVE_THRESHOLD = 4000
+
+
+def _delivery_max_platform_output() -> int:
+    """Return platform truncation cap; 0 disables truncation."""
+    raw = os.environ.get("HERMES_DELIVERY_MAX_PLATFORM_OUTPUT")
+    if raw is None:
+        return MAX_PLATFORM_OUTPUT
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid HERMES_DELIVERY_MAX_PLATFORM_OUTPUT=%r; using default %d",
+            raw,
+            MAX_PLATFORM_OUTPUT,
+        )
+        return MAX_PLATFORM_OUTPUT
 
 # Matches strings that are *only* a "silence" narration with optional markdown
 # wrappers. Covers: *(silent)*, _silent_, `silent`, ~silent~, (silent), silent,
@@ -415,7 +430,11 @@ class DeliveryRouter:
         job_id = (metadata or {}).get("job_id", "unknown")
         saved_path: Optional[Path] = None
 
-        if len(content) > MAX_PLATFORM_OUTPUT:
+        max_platform_output = _delivery_max_platform_output()
+        should_audit_save = len(content) > AUDIT_SAVE_THRESHOLD
+        should_truncate = max_platform_output > 0 and len(content) > max_platform_output
+
+        if should_audit_save or should_truncate:
             # Step 1 — audit save (best-effort).  The save is a side-effect
             # audit trail, not essential to delivery.  If it fails (full disk,
             # permissions), delivery proceeds — the content reaches the adapter
@@ -430,7 +449,7 @@ class DeliveryRouter:
                 )
 
             # Step 2 — truncation (only for non-chunking adapters).
-            if getattr(adapter, "splits_long_messages", False):
+            if getattr(adapter, "splits_long_messages", False) or not should_truncate:
                 # Adapter chunks natively — deliver full payload.
                 if saved_path:
                     logger.info(
@@ -445,7 +464,7 @@ class DeliveryRouter:
                 if saved_path is None:
                     saved_path = self._save_full_output(content, job_id)
                 footer = f"\n\n... [truncated, full output saved to {saved_path}]"
-                visible = max(0, MAX_PLATFORM_OUTPUT - len(footer))
+                visible = max(0, max_platform_output - len(footer))
                 logger.info(
                     "Cron output truncated (%d chars) — full output: %s",
                     len(content), saved_path,
