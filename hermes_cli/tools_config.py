@@ -695,9 +695,6 @@ def _pip_install(
 # `cua-driver check-update --json`) gives us the canonical update
 # answer from the binary itself — same tag-resolution as the installer,
 # no Python-side duplication.
-def _check_cua_driver_asset_for_arch() -> bool:
-    """Check whether the latest CUA release ships an asset for this OS+arch.
-
 
 
 def install_cua_driver(upgrade: bool = False) -> bool:
