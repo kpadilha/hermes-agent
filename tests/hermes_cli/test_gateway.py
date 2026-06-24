@@ -197,6 +197,54 @@ def test_build_architecture_dashboard_does_not_require_recent_turn_proof_mid_tur
     assert dashboard["overall"]["status"] == "ok"
 
 
+def test_build_architecture_dashboard_ignores_interrupted_turn_while_session_resumed():
+    """A restart-interrupted turn should not keep dashboard degraded mid-resume."""
+    dashboard = gateway._build_architecture_dashboard(
+        runtime_state={
+            "active_agents": 1,
+            "lcm_runtime": {
+                "scorecard": {
+                    "runtime_health": "ok",
+                    "workflows": {
+                        "fallback_activation": {"success": 1, "failure": 0, "total": 1, "success_rate_pct": 100.0},
+                    },
+                }
+            },
+            "lcm_memory": {
+                "scorecard": {
+                    "memory_sync_health": "ok",
+                    "workflows": {
+                        "memory_write_propagation": {"success": 2, "failure": 0, "total": 2, "success_rate_pct": 100.0},
+                    },
+                }
+            },
+            "lcm_recent_turn": {
+                "recent_workflow_events": [
+                    {"workflow": "gateway_turn_completion", "outcome": "failure", "failure_class": "interrupted"}
+                ],
+                "scorecard": {
+                    "continuity_health": "degraded",
+                    "workflows": {
+                        "gateway_turn_completion": {"success": 0, "failure": 1, "total": 1, "success_rate_pct": 0.0},
+                    },
+                },
+            },
+        },
+        lcm_gateway={
+            "scorecard": {
+                "runtime_health": "ok",
+                "workflows": {
+                    "health_check_execution": {"success": 1, "failure": 0, "total": 1, "success_rate_pct": 100.0},
+                },
+            }
+        },
+    )
+
+    assert dashboard["hermes_acts"]["status"] == "ok"
+    assert dashboard["lcm_proves"]["status"] == "ok"
+    assert dashboard["overall"]["status"] == "ok"
+
+
 def test_build_architecture_dashboard_ignores_runtime_health_without_matching_workflow():
     dashboard = gateway._build_architecture_dashboard(
         runtime_state={
