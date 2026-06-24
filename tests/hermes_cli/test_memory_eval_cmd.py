@@ -15,7 +15,7 @@ def test_memory_eval_command_outputs_json(tmp_path, capsys):
     kb = tmp_path / "kb"
     note = kb / "wiki" / "operations" / "hermes-memory-architecture.md"
     note.parent.mkdir(parents=True)
-    note.write_text("KB Compiled Truth. Memory Write Gate and Belief Ledger.\n", encoding="utf-8")
+    note.write_text("KB Compiled Truth. USER.md source; Honcho projection. Memory Write Gate and Belief Ledger.\n", encoding="utf-8")
 
     memory_eval_command(SimpleNamespace(json=True), hermes_home=hermes_home, kb_root=kb)
 
