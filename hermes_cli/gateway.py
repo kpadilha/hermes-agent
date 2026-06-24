@@ -4934,6 +4934,7 @@ def _build_architecture_dashboard(
         continuity_status = "not_applicable"
         continuity_required = False
     memory_status = memory_scorecard.get("memory_sync_health") if memory_workflows else "unknown"
+    memory_write_signal = memory_workflows.get("memory_write_propagation")
     memory_audit_signal = memory_workflows.get("memory_audit")
     memory_reconcile_signal = memory_workflows.get("memory_reconcile_projection")
     healthcheck_status = gateway_scorecard.get("runtime_health") if isinstance(gateway_workflows.get("health_check_execution"), dict) else "unknown"
