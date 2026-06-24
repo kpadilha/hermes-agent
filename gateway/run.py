@@ -4575,15 +4575,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         between transitions is stale (a turn could start and finish without the
         file ever moving).
 
-        Deliberately passes ONLY ``active_agents`` — ``gateway_state`` and the
-        other fields stay ``_UNSET`` so ``write_runtime_status``'s
-        read-merge-write preserves the current lifecycle state (``running`` /
-        ``draining`` / …).  Passing ``gateway_state=None`` here would clobber it.
-        Best-effort: a failed status write must never disrupt a turn.
+        Deliberately passes ONLY activity fields — ``gateway_state`` stays
+        ``_UNSET`` so ``write_runtime_status``'s read-merge-write preserves the
+        current lifecycle state (``running`` / ``draining`` / …). Passing
+        ``gateway_state=None`` here would clobber it. Best-effort: a failed
+        status write must never disrupt a turn.
         """
         try:
             from gateway.status import write_runtime_status
-            write_runtime_status(active_agents=self._active_work_count())
+            write_runtime_status(
+                active_agents=self._active_work_count(),
+                active_agent_sessions=self._active_agent_session_keys(),
+                activity_status_version=1,
+                activity_changed_at=None,
+            )
         except Exception:
             pass
     def _record_recent_turn_lcm_state(self, result: dict | None, *, session_id: str | None = None) -> None:
