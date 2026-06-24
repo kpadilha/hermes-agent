@@ -5097,12 +5097,21 @@ def _build_architecture_dashboard(
 
     fallback_status = runtime_scorecard.get("runtime_health") if isinstance(fallback_workflow, dict) else "unknown"
     active_agents = int(runtime_state.get("active_agents", 0) or 0) if isinstance(runtime_state, dict) else 0
+    recent_turn_events = recent_turn_lcm.get("recent_workflow_events", []) if isinstance(recent_turn_lcm, dict) else []
+    latest_recent_turn = recent_turn_events[-1] if recent_turn_events and isinstance(recent_turn_events[-1], dict) else {}
+    latest_turn_interrupted = (
+        latest_recent_turn.get("workflow") == "gateway_turn_completion"
+        and latest_recent_turn.get("failure_class") == "interrupted"
+    )
     # A live in-flight turn is not missing completed-turn continuity proof.
     # Require recent-turn coverage only when a recent-turn scorecard exists;
     # otherwise mark the signal not_applicable so active conversations do not
     # make the global architecture dashboard permanently unknown mid-turn.
     continuity_required = bool(continuity_workflows)
     continuity_status = recent_turn_scorecard.get("continuity_health") if continuity_workflows else "not_applicable"
+    if active_agents > 0 and latest_turn_interrupted and continuity_status == "degraded":
+        continuity_status = "not_applicable"
+        continuity_required = False
     memory_status = memory_scorecard.get("memory_sync_health") if memory_workflows else "unknown"
     memory_write_signal = memory_workflows.get("memory_write_propagation")
     memory_audit_signal = memory_workflows.get("memory_audit")

@@ -4038,7 +4038,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         try:
             from gateway.status import write_runtime_status
-            write_runtime_status(active_agents=self._running_agent_count())
+            write_runtime_status(
+                active_agents=self._running_agent_count(),
+                active_agent_sessions=self._active_agent_session_keys(),
+                activity_status_version=1,
+                activity_changed_at=None,
+            )
         except Exception:
             pass
     def _record_recent_turn_lcm_state(self, result: dict | None, *, session_id: str | None = None) -> None:
