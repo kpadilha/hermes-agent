@@ -1602,10 +1602,6 @@ def init_agent(
             relevance_pinning_max_chars_total=relevance_pinning_max_chars_total,
             relevance_pinning_min_score=relevance_pinning_min_score,
             max_tokens=agent.max_tokens,
-            relevance_pinning_enabled=relevance_pinning_enabled,
-            relevance_pinning_max_pins=relevance_pinning_max_pins,
-            relevance_pinning_max_chars_total=relevance_pinning_max_chars_total,
-            relevance_pinning_min_score=relevance_pinning_min_score,
         )
     agent.compression_enabled = compression_enabled
 
