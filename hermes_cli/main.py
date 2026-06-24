@@ -12563,7 +12563,7 @@ def main():
     proof_parser.set_defaults(func=cmd_proof)
 
     # =========================================================================
-    # memory command
+    # memory command  (parser built in hermes_cli/subcommands/memory.py)
     # =========================================================================
     build_memory_parser(subparsers, cmd_memory=cmd_memory)
 
