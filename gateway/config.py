@@ -832,6 +832,21 @@ def load_gateway_config() -> GatewayConfig:
             if sr and isinstance(sr, dict):
                 gw_data["default_reset_policy"] = sr
 
+            # Preserve per-session reset overrides from config.yaml. These
+            # keys are part of GatewayConfig.from_dict(), but this loader used
+            # to map only the default session_reset policy. Result: settings
+            # written by `hermes config set reset_by_type.thread.*` were visible
+            # to hermes_cli.config.load_config() yet silently ignored by the
+            # live messaging gateway, so Discord/Telegram threads could still
+            # reset on the default daily boundary.
+            rbt = yaml_cfg.get("reset_by_type")
+            if isinstance(rbt, dict):
+                gw_data["reset_by_type"] = rbt
+
+            rbp = yaml_cfg.get("reset_by_platform")
+            if isinstance(rbp, dict):
+                gw_data["reset_by_platform"] = rbp
+
             qc = yaml_cfg.get("quick_commands")
             if qc is not None:
                 if isinstance(qc, dict):
