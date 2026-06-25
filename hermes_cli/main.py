@@ -3232,7 +3232,7 @@ def _build_cli_parser():
 
     build_curator_parser(subparsers)
     build_pets_parser(subparsers)
-    from hermes_cli.proof_trail_cmd import register_proof_parser
+    from hermes_cli.local_proof_ops.cli import register_proof_parser
 
     register_proof_parser(subparsers)
     build_journey_parser(subparsers)
