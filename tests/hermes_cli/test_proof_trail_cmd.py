@@ -2,12 +2,18 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import hermes_cli.proof_trail_cmd as proof_trail_compat
+from hermes_cli.local_proof_ops import trail as proof_trail_impl
 from hermes_cli.proof_trail_cmd import (
     build_proof_markdown,
     create_proof_record,
     proof_trail_command,
     slugify_title,
 )
+
+
+def test_compatibility_module_aliases_local_proof_implementation():
+    assert proof_trail_compat is proof_trail_impl
 
 
 def test_slugify_title_is_filesystem_safe_and_stable():
