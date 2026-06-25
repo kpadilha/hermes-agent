@@ -41,10 +41,21 @@ def _line_of(text: str, needle: str) -> tuple[int, str]:
     return 1, ""
 
 
+def _first_existing(repo: Path, candidates: list[str]) -> Path:
+    for candidate in candidates:
+        path = repo / candidate
+        if path.exists():
+            return path
+    return repo / candidates[0]
+
+
 def audit_repo(repo: Path) -> list[Finding]:
     findings: list[Finding] = []
 
-    reconcile = repo / "hermes_cli" / "memory_reconcile_cmd.py"
+    reconcile = _first_existing(repo, [
+        "hermes_cli/local_memory_ops/reconcile_cmd.py",
+        "hermes_cli/memory_reconcile_cmd.py",
+    ])
     reconcile_text = _read(reconcile)
     rel = str(reconcile.relative_to(repo))
     if "conclusions/list?size={size}&page={page}" not in reconcile_text or "while True:" not in reconcile_text:
@@ -87,7 +98,10 @@ def audit_repo(repo: Path) -> list[Finding]:
                 snippet=snippet,
             ))
 
-    ledger = repo / "agent" / "memory_ledger.py"
+    ledger = _first_existing(repo, [
+        "hermes_cli/local_memory_ops/ledger.py",
+        "agent/memory_ledger.py",
+    ])
     ledger_text = _read(ledger)
     if "def _require_row_updated" not in ledger_text or "cursor.rowcount" not in ledger_text:
         line, snippet = _line_of(ledger_text, "def update_record")
@@ -102,10 +116,10 @@ def audit_repo(repo: Path) -> list[Finding]:
 
     finite_all_record_pattern = re.compile(r"ledger\.search\(\s*['\"]['\"]\s*,\s*limit\s*=")
     for candidate in [
-        repo / "hermes_cli" / "memory_reconcile_cmd.py",
-        repo / "hermes_cli" / "memory_graph_cmd.py",
-        repo / "hermes_cli" / "memory_snapshot_cmd.py",
-        repo / "hermes_cli" / "memory_ledger_cmd.py",
+        _first_existing(repo, ["hermes_cli/local_memory_ops/reconcile_cmd.py", "hermes_cli/memory_reconcile_cmd.py"]),
+        _first_existing(repo, ["hermes_cli/local_memory_ops/graph_cmd.py", "hermes_cli/memory_graph_cmd.py"]),
+        _first_existing(repo, ["hermes_cli/local_memory_ops/snapshot_cmd.py", "hermes_cli/memory_snapshot_cmd.py"]),
+        _first_existing(repo, ["hermes_cli/local_memory_ops/ledger_cmd.py", "hermes_cli/memory_ledger_cmd.py"]),
     ]:
         text = _read(candidate)
         for match in finite_all_record_pattern.finditer(text):
