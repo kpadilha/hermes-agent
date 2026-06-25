@@ -83,6 +83,8 @@ def test_memory_snapshot_create_writes_mv2_and_markdown_metadata(tmp_path, capsy
     assert "# Memvid Memory Snapshot" in text
     assert "Krishna prefers local-first memory." in text
     assert "local-first" in text
+    assert "## Graph context" in text
+    assert "[[niko/operations/memory-snapshots/README|Memory Snapshots Index]]" in text
 
 
 def test_build_snapshot_status_report_finds_latest_mv2_and_wrapper(tmp_path):
