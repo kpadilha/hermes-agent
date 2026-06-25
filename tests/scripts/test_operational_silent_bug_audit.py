@@ -32,6 +32,24 @@ def test_operational_audit_accepts_guarded_patterns(tmp_path):
     assert audit_repo(tmp_path) == []
 
 
+def test_operational_audit_accepts_guarded_patterns_in_extracted_local_memory_ops(tmp_path):
+    _write_minimal_repo(tmp_path, paginated=False, gated=True, rowcount_guarded=False)
+    local_ops = tmp_path / "hermes_cli" / "local_memory_ops"
+    local_ops.mkdir(parents=True)
+    (local_ops / "reconcile_cmd.py").write_text(
+        'endpoint = f"/conclusions/list?size={size}&page={page}"\nwhile True:\n    break\n',
+        encoding="utf-8",
+    )
+    (local_ops / "ledger.py").write_text(
+        "def _require_row_updated(cursor):\n    return cursor.rowcount\n",
+        encoding="utf-8",
+    )
+    for name in ["graph_cmd.py", "snapshot_cmd.py", "ledger_cmd.py"]:
+        (local_ops / name).write_text("records = ledger.list_records()\n", encoding="utf-8")
+
+    assert audit_repo(tmp_path) == []
+
+
 def test_operational_audit_flags_unpaginated_honcho_and_unguarded_bridge(tmp_path):
     _write_minimal_repo(tmp_path, paginated=False, gated=False)
 
