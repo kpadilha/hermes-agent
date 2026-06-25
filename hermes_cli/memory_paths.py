@@ -1,26 +1,11 @@
-"""Path helpers for Hermes memory-adjacent operational artifacts."""
+"""Compatibility alias for local memory operations.
 
-from __future__ import annotations
+Implementation lives in hermes_cli.local_memory_ops.paths.  This module aliases itself to the implementation
+module so existing imports and monkeypatches keep targeting the real globals.
+"""
 
-import os
-from pathlib import Path
+from importlib import import_module as _import_module
+import sys as _sys
 
-
-def os_account_home() -> Path:
-    """Return the operating-system account home, not Hermes' profile sandbox HOME."""
-    try:
-        import pwd
-
-        return Path(pwd.getpwuid(os.getuid()).pw_dir)
-    except Exception:
-        return Path.home()
-
-
-def default_kb_root() -> Path:
-    """Canonical Krishna KB root, independent of profile/worker HOME sandboxes."""
-    return os_account_home() / "obsidian-vault" / "Krishna" / "kb"
-
-
-def default_memory_snapshot_dir() -> Path:
-    """Canonical Obsidian-syncable Memvid snapshot directory."""
-    return os_account_home() / "obsidian-vault" / "Krishna" / "niko" / "operations" / "memory-snapshots"
+_impl = _import_module("hermes_cli.local_memory_ops.paths")
+_sys.modules[__name__] = _impl
