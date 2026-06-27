@@ -220,28 +220,6 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
             f"unintended spend. {remediation}"
         )
 
-    # A no_agent job IS its script — run_job short-circuits it before any model
-    # is reached ("no LLM involvement", see the no_agent branch in run_job). So
-    # provider timeouts, rate limits, auth errors and fallback chains are not
-    # merely unlikely for these jobs, they are structurally impossible. Classify
-    # on the job's MODE before pattern-matching its prose.
-    #
-    # Without this gate the branches below classify by substring, so a script's
-    # own wording decides which subsystem gets blamed. _run_job_script reports a
-    # timeout as "Script timed out after {n}s: {path}" — that contains "timed
-    # out", so it matched the provider branch and the operator was told
-    # "provider timeout. Fallback chain was exhausted or unavailable." for a job
-    # that never opened a socket. "429" or "authentication" appearing anywhere
-    # in a script's output misfires the same way.
-    #
-    # A delivery line that names the wrong subsystem is worse than no line at
-    # all: it does not merely fail to inform, it sends the reader to the wrong
-    # place.
-    #
-    # Falling through leaves the generic cleaner below to report what actually
-    # happened, naming the script. No new message text is needed.
-    provider_reachable = not job.get("no_agent")
-
     # Script execution happens outside the LLM/provider path (also for
     # agent-backed jobs that run a context script). Check the script runner's
     # explicit error contract ("Script timed out after {n}s: {path}") before
@@ -252,6 +230,27 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
             f"⚠️ Cron '{job_name}' failed: script timed out. "
             "No model was invoked. Full details saved in cron output."
         )
+
+    # no_agent jobs short-circuit before model/provider setup. Attribute every
+    # remaining failure to the script, regardless of provider-like wording in
+    # its stderr.
+    if job.get("no_agent"):
+        cleaned = re.sub(
+            r"^(RuntimeError|Exception|ValueError):\s*",
+            "",
+            text[:2000],
+        )
+        cleaned = re.sub(r"\s+", " ", cleaned).strip() or "unknown script error"
+        if "readtimeout" in lower or "timed out" in lower or "timeout" in lower:
+            return (
+                f"⚠️ Cron '{job_name}' script failed: timeout. "
+                "Full details saved in cron output."
+            )
+        if len(cleaned) > 180:
+            cleaned = cleaned[:177].rstrip() + "..."
+        return f"⚠️ Cron '{job_name}' script failed: {cleaned}"
+
+    provider_reachable = True
 
     # Provider/API failures are the common noisy path. Keep these short.
     # Match 429 as a whole token (#83188 @cation98): bare substring matching
