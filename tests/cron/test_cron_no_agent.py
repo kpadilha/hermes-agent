@@ -261,6 +261,20 @@ def test_run_job_no_agent_script_failure_delivers_error(hermes_env):
     assert "Cron watchdog" in final_response  # alert header
 
 
+def test_no_agent_failure_summary_does_not_claim_provider_fallback(hermes_env):
+    """Script timeouts are not provider failures; do not mention fallback chain."""
+    from cron.scheduler import _summarize_cron_failure_for_delivery
+
+    msg = _summarize_cron_failure_for_delivery(
+        {"id": "job1", "name": "watchdog", "no_agent": True},
+        "Script exited with code 1\nstdout:\nwatchdog failed: TimeoutError: The read operation timed out",
+    )
+
+    assert "script failed: timeout" in msg
+    assert "provider" not in msg
+    assert "Fallback chain" not in msg
+
+
 def test_run_job_no_agent_never_invokes_aiagent(hermes_env):
     """no_agent jobs must NOT import/construct the AIAgent."""
     from cron.jobs import create_job
