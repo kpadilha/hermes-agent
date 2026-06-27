@@ -58,6 +58,22 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     text = (error or "unknown error").strip()
     lower = text.lower()
 
+    if job.get("no_agent"):
+        cleaned = re.sub(
+            r"^(RuntimeError|Exception|ValueError):\s*",
+            "",
+            text[:2000],
+        )
+        cleaned = re.sub(r"\s+", " ", cleaned).strip() or "unknown script error"
+        if "readtimeout" in lower or "timed out" in lower or "timeout" in lower:
+            return (
+                f"⚠️ Cron '{job_name}' script failed: timeout. "
+                "Full details saved in cron output."
+            )
+        if len(cleaned) > 180:
+            cleaned = cleaned[:177].rstrip() + "..."
+        return f"⚠️ Cron '{job_name}' script failed: {cleaned}"
+
     # Provider/API failures are the common noisy path. Keep these short.
     if "429" in text or "rate limit" in lower or "usage limit" in lower:
         reason = "rate limit"
