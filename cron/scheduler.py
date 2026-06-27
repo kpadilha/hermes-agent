@@ -268,6 +268,11 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     # Script runner contract ("Script timed out after {n}s: {path}") — also for agent jobs with a
     # context script. Must precede provider classification so it never claims a model failure.
     # See #78503, #82460.
+    # Script execution happens outside the LLM/provider path (also for
+    # agent-backed jobs that run a context script). Check the script runner's
+    # explicit error contract ("Script timed out after {n}s: {path}") before
+    # generic timeout matching so a script timeout never claims a provider
+    # fallback was attempted (#82460 @jbagdonas, #78503 @daxro).
     if lower.startswith("script timed out"):
         return script_timeout_notice(job_name, job_id)
 
@@ -275,6 +280,62 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     # quiet, no model service involved. Its text may still contain "timed out", so it must be
     # recognised before the classifier (field-reported: a stuck `terminal` call was blamed on the
     # provider and the operator debugged the wrong system).
+    # Whole-token 429: substrings in job ids/ports/hashes tripped false rate-limit alerts.
+    # no_agent jobs short-circuit before model/provider setup. Attribute every
+    # remaining failure to the script, regardless of provider-like wording in
+    # its stderr.
+    if job.get("no_agent"):
+        cleaned = re.sub(
+            r"^(RuntimeError|Exception|ValueError):\s*",
+            "",
+            text[:2000],
+        )
+        cleaned = re.sub(r"\s+", " ", cleaned).strip() or "unknown script error"
+        if "readtimeout" in lower or "timed out" in lower or "timeout" in lower:
+            return (
+                f"⚠️ Cron '{job_name}' script failed: timeout. "
+                "Full details saved in cron output."
+            )
+        if len(cleaned) > 180:
+            cleaned = cleaned[:177].rstrip() + "..."
+        return f"⚠️ Cron '{job_name}' script failed: {cleaned}"
+
+    provider_reachable = True
+
+    # Provider/API failures are the common noisy path. Keep these short.
+    # Match 429 as a whole token (#83188 @cation98): bare substring matching
+    # let identifiers containing those digits (job ids, ports, hashes) trip
+    # a false "provider rate limit" alert.
+    if provider_reachable and (
+        # Provider/API failures are the common noisy path. Keep these short. Match 429 as a whole token
+        # (#83188 @cation98): bare substring matching let identifiers containing those digits (job ids,
+        # ports, hashes) trip a false "provider rate limit" alert.
+        re.search(r"\b429\b", text) or "rate limit" in lower or "usage limit" in lower
+    ):
+        reason = "rate limit"
+        if "weekly usage limit" in lower:
+            reason = "weekly usage limit"
+        elif "quota" in lower:
+            reason = "quota limit"
+        return (
+            f"⚠️ Cron '{job_name}' failed: provider {reason}. "
+            f"{_fallback_chain_phrase()} "
+            "Full details saved in cron output."
+        )
+
+    # Scheduler inactivity watchdog shape ("idle for {n}s (limit {m}s)"). Must precede the generic
+    # provider-timeout branch: the job's own tool going quiet involves no provider/fallback chain.
+    # The scheduler's own inactivity watchdog (see the TimeoutError raised above at "Cron job '{job_name}'
+    # idle for {secs}s (limit {limit}s) — last activity: {desc}") produces a message that contains the
+    # substring "timed out"/"timeout" nowhere, but DOES contain "idle for ... (limit ...)" — however
+    # older/other call sites can still phrase an inactivity abort using "timed out" wording, so match on the
+    # "idle for Ns (limit" shape specifically (case-insensitive) BEFORE the generic provider- timeout branch
+    # below. Without this, an inactivity timeout — the job's OWN tool call/turn going quiet, no provider or
+    # fallback chain ever involved — gets rewritten into a misleading "provider timeout / fallback chain
+    # exhausted" message, sending the operator to debug the wrong system entirely (field-reported: a stuck
+    # `terminal` tool call tripped the 600s inactivity limit and was reported as a provider/fallback
+    # failure). Mirrors the same reordering fix upstream issue #59549 applied for script timeouts vs
+    # provider timeouts — check the more specific, deterministic signature first.
     if re.search(r"idle for \d+s\s*\(limit \d+s\)", lower):
         return inactivity_notice(job_name, job_id)
 
