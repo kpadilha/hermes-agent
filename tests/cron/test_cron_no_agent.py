@@ -108,10 +108,7 @@ def test_run_job_no_agent_success_returns_script_stdout(hermes_env):
 
 
 def test_run_job_no_agent_reloads_dotenv_before_script(hermes_env, monkeypatch):
-    """Regression: a standalone cron tick process starts without home-channel
-    vars in its environment, and the agent path's per-run dotenv reload never
-    executes for no_agent jobs — delivery home channels stayed unresolved.
-    run_job must load .env at the top of the no_agent branch."""
+    """Regression: standalone cron ticks must load home-channel variables."""
     import hermes_cli.env_loader as env_loader
     from cron.jobs import create_job
     from cron.scheduler import run_job
@@ -238,6 +235,90 @@ def test_agent_provider_timeout_delivery_keeps_fallback_guidance(hermes_env, mon
     # Chain wording is now honest (#85508): exhausted when configured,
     # "no fallback chain configured" guidance otherwise.
     assert "fallback chain" in delivered[0].lower()
+
+
+def test_run_job_no_agent_empty_output_is_silent(hermes_env):
+    """Empty stdout → SILENT_MARKER, which suppresses delivery downstream."""
+    from cron.jobs import create_job
+    from cron.scheduler import run_job, SILENT_MARKER
+
+    script_path = hermes_env / "scripts" / "quiet.sh"
+    script_path.write_text("#!/bin/bash\n# nothing to say\n")
+
+    job = create_job(
+        prompt=None, schedule="every 5m", script="quiet.sh", no_agent=True, deliver="local"
+    )
+    success, doc, final_response, error = run_job(job)
+    assert success is True
+    assert error is None
+    assert final_response == SILENT_MARKER
+
+
+def test_run_job_no_agent_wake_gate_is_silent(hermes_env):
+    """wakeAgent=false gate in stdout triggers a silent run."""
+    from cron.jobs import create_job
+    from cron.scheduler import run_job, SILENT_MARKER
+
+    script_path = hermes_env / "scripts" / "gated.sh"
+    script_path.write_text('#!/bin/bash\necho \'{"wakeAgent": false}\'\n')
+
+    job = create_job(
+        prompt=None, schedule="every 5m", script="gated.sh", no_agent=True, deliver="local"
+    )
+    success, doc, final_response, error = run_job(job)
+    assert success is True
+    assert final_response == SILENT_MARKER
+
+
+def test_run_job_no_agent_script_failure_delivers_error(hermes_env):
+    """Non-zero exit → success=False, error alert is the delivered message."""
+    from cron.jobs import create_job
+    from cron.scheduler import run_job
+
+    script_path = hermes_env / "scripts" / "broken.sh"
+    script_path.write_text("#!/bin/bash\necho oops >&2\nexit 3\n")
+
+    job = create_job(
+        prompt=None, schedule="every 5m", script="broken.sh", no_agent=True, deliver="local"
+    )
+    success, doc, final_response, error = run_job(job)
+    assert success is False
+    assert error is not None
+    assert "oops" in final_response or "exited with code 3" in final_response
+    assert "Cron watchdog" in final_response  # alert header
+
+
+def test_no_agent_failure_summary_does_not_claim_provider_fallback(hermes_env):
+    """Script timeouts are not provider failures; do not mention fallback chain."""
+    from cron.scheduler import _summarize_cron_failure_for_delivery
+
+    msg = _summarize_cron_failure_for_delivery(
+        {"id": "job1", "name": "watchdog", "no_agent": True},
+        "Script exited with code 1\nstdout:\nwatchdog failed: TimeoutError: The read operation timed out",
+    )
+
+    assert "script failed: timeout" in msg
+    assert "provider" not in msg
+    assert "Fallback chain" not in msg
+
+
+def test_run_job_no_agent_never_invokes_aiagent(hermes_env):
+    """no_agent jobs must NOT import/construct the AIAgent."""
+    from cron.jobs import create_job
+
+    script_path = hermes_env / "scripts" / "alert.sh"
+    script_path.write_text("#!/bin/bash\necho alert\n")
+
+    job = create_job(
+        prompt=None, schedule="every 5m", script="alert.sh", no_agent=True, deliver="local"
+    )
+
+    with patch("run_agent.AIAgent") as ai_mock:
+        from cron.scheduler import run_job
+
+        run_job(job)
+
+    ai_mock.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
