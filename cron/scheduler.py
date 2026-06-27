@@ -246,6 +246,11 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     # Script runner contract ("Script timed out after {n}s: {path}") — also for agent jobs with a
     # context script. Must precede generic timeout matching so it never claims a provider fallback.
     # See #78503, #82460.
+    # Script execution happens outside the LLM/provider path (also for
+    # agent-backed jobs that run a context script). Check the script runner's
+    # explicit error contract ("Script timed out after {n}s: {path}") before
+    # generic timeout matching so a script timeout never claims a provider
+    # fallback was attempted (#82460 @jbagdonas, #78503 @daxro).
     if lower.startswith("script timed out"):
         return (
             f"⚠️ Cron '{job_name}' failed: script timed out. "
@@ -253,6 +258,31 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
         )
 
     # Whole-token 429: substrings in job ids/ports/hashes tripped false rate-limit alerts.
+    # no_agent jobs short-circuit before model/provider setup. Attribute every
+    # remaining failure to the script, regardless of provider-like wording in
+    # its stderr.
+    if job.get("no_agent"):
+        cleaned = re.sub(
+            r"^(RuntimeError|Exception|ValueError):\s*",
+            "",
+            text[:2000],
+        )
+        cleaned = re.sub(r"\s+", " ", cleaned).strip() or "unknown script error"
+        if "readtimeout" in lower or "timed out" in lower or "timeout" in lower:
+            return (
+                f"⚠️ Cron '{job_name}' script failed: timeout. "
+                "Full details saved in cron output."
+            )
+        if len(cleaned) > 180:
+            cleaned = cleaned[:177].rstrip() + "..."
+        return f"⚠️ Cron '{job_name}' script failed: {cleaned}"
+
+    provider_reachable = True
+
+    # Provider/API failures are the common noisy path. Keep these short.
+    # Match 429 as a whole token (#83188 @cation98): bare substring matching
+    # let identifiers containing those digits (job ids, ports, hashes) trip
+    # a false "provider rate limit" alert.
     if provider_reachable and (
         # Provider/API failures are the common noisy path. Keep these short. Match 429 as a whole token
         # (#83188 @cation98): bare substring matching let identifiers containing those digits (job ids,
