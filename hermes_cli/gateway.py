@@ -5396,9 +5396,12 @@ def _build_architecture_dashboard(
     }
 
 
-def _probe_api_server_health(url: str, timeout: float = 2.0) -> dict[str, object]:
+def _probe_api_server_health(url: str, timeout: float = 2.0, api_key: str | None = None) -> dict[str, object]:
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        target = url
+        if api_key:
+            target = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+        with urllib.request.urlopen(target, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
             data = json.loads(body)
             return {"ok": True, "url": url, "body": data}
@@ -5423,9 +5426,10 @@ def build_gateway_health_payload(system: bool = False) -> dict[str, object]:
         extra = api_cfg.extra if isinstance(api_cfg.extra, dict) else {}
         api_host = str(extra.get("host") or "127.0.0.1")
         api_port = int(extra.get("port") or 8642)
+        api_key = str(extra.get("key") or os.getenv("API_SERVER_KEY", ""))
         base = f"http://{api_host}:{api_port}"
         api_health = _probe_api_server_health(f"{base}/health")
-        api_health_detailed = _probe_api_server_health(f"{base}/health/detailed")
+        api_health_detailed = _probe_api_server_health(f"{base}/health/detailed", api_key=api_key)
         health_ok = bool(api_health.get("ok"))
         detailed_ok = bool(api_health_detailed.get("ok"))
         runtime_state = _record_gateway_workflow_event(
