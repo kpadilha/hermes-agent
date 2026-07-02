@@ -311,6 +311,32 @@ def test_gateway_health_json_uses_runtime_and_api_probe(monkeypatch, capsys):
     assert payload["lcm_gateway"]["scorecard"]["runtime_health"] == "ok"
 
 
+def test_probe_api_server_health_sends_bearer_for_authenticated_probe(monkeypatch):
+    seen = {}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self):
+            return b'{"status":"ok"}'
+
+    def fake_urlopen(target, timeout):
+        seen["timeout"] = timeout
+        seen["auth"] = target.headers.get("Authorization")
+        return _Response()
+
+    monkeypatch.setattr(gateway.urllib.request, "urlopen", fake_urlopen)
+
+    result = gateway._probe_api_server_health("http://127.0.0.1:8642/health/detailed", api_key="secret")
+
+    assert result["ok"] is True
+    assert seen == {"timeout": 2.0, "auth": "Bearer secret"}
+
+
 def test_gateway_health_text_reports_api_server_status(monkeypatch, capsys):
     monkeypatch.setattr(
         gateway,
@@ -442,7 +468,7 @@ def test_build_gateway_health_payload_reads_recent_turn_and_memory_from_runtime_
         running=True,
     ))
     monkeypatch.setattr(gateway, "_load_runtime_health_state", lambda: runtime_state)
-    monkeypatch.setattr(gateway, "_probe_api_server_health", lambda url, timeout=2.0: {"ok": True, "url": url})
+    monkeypatch.setattr(gateway, "_probe_api_server_health", lambda url, timeout=2.0, api_key=None: {"ok": True, "url": url})
     monkeypatch.setattr(gateway, "_record_gateway_workflow_event", lambda state, workflow, outcome, **kwargs: {
         **state,
         "lcm_gateway": {
