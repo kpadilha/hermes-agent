@@ -5469,6 +5469,7 @@ class BasePlatformAdapter(ABC):
         message_id: Optional[str] = None,
         role_authorized: bool = False,
         auto_thread_created: bool = False,
+        auto_thread_rename_allowed: bool = False,
         auto_thread_initial_name: Optional[str] = None,
     ) -> SessionSource:
         """Helper to build a SessionSource for this platform."""
@@ -5492,6 +5493,7 @@ class BasePlatformAdapter(ABC):
             message_id=str(message_id) if message_id else None,
             role_authorized=role_authorized,
             auto_thread_created=auto_thread_created,
+            auto_thread_rename_allowed=auto_thread_rename_allowed,
             auto_thread_initial_name=auto_thread_initial_name,
         )
     
