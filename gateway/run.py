@@ -13682,7 +13682,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return cleaned
 
     def _is_discord_auto_thread_lane(self, source: SessionSource) -> bool:
-        """Return True only for Discord threads Hermes just auto-created."""
+        """Return True for explicitly provenance-gated Discord thread renames."""
         return (
             source.platform == Platform.DISCORD
             and source.chat_type == "thread"
@@ -13714,7 +13714,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         session_id: str,
         title: str,
     ) -> None:
-        """Best-effort semantic rename of a newly auto-created Discord thread."""
+        """Best-effort guarded semantic rename of a Discord thread."""
         if not await asyncio.to_thread(self._is_discord_auto_thread_lane, source):
             return
         adapter = self.adapters.get(source.platform) if getattr(self, "adapters", None) else None
