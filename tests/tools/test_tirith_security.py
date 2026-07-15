@@ -1464,6 +1464,29 @@ class TestPrivateLanRawIpSuppression:
         assert result["action"] == "warn"
         assert len(result["findings"]) == 1
 
+    @pytest.mark.parametrize("command", [
+        "curl --config probe.conf http://192.168.1.86/health",
+        "curl --location http://192.168.1.86/health",
+        "curl --header=Authorization:secret http://192.168.1.86/health",
+        "curl -HAuthorization:secret http://192.168.1.86/health",
+        "curl --cookie session=secret http://192.168.1.86/health",
+        "curl http://user:pass@192.168.1.86/health",
+        "curl http://192.0.2.1/health",
+        "curl http://198.51.100.1/health",
+        "wget -qO- http://192.168.1.86/health",
+    ])
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_bypass_forms_and_reserved_ranges_preserve_warn(
+        self, mock_cfg, mock_run, command
+    ):
+        mock_cfg.return_value = _CFG
+        findings = [{"rule_id": "raw_ip_url", "message": "URL uses raw IP address"}]
+        mock_run.return_value = _mock_run(2, _json_stdout(findings, "raw IP"))
+        result = check_command_security(command)
+        assert result["action"] == "warn"
+        assert len(result["findings"]) == 1
+
     @patch("tools.tirith_security.subprocess.run")
     @patch("tools.tirith_security._load_security_config")
     def test_private_raw_ip_mixed_findings_preserve_warn(self, mock_cfg, mock_run):
