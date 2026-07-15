@@ -904,13 +904,21 @@ _READONLY_PROBE_PATHS = (
     "/api/tags",
     "/api/version",
 )
-_MUTATING_CURL_FLAGS = {
-    "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
-    "-F", "--form", "--form-string", "-T", "--upload-file",
-}
-_CREDENTIAL_FLAGS = {"-u", "--user", "--oauth2-bearer", "--proxy-user"}
-_MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-_READONLY_METHODS = {"GET", "HEAD"}
+_SAFE_CURL_SHORT_FLAGS = frozenset("fsSI")
+_SAFE_CURL_LONG_FLAGS = {"--fail", "--silent", "--show-error", "--head"}
+_SAFE_CURL_VALUE_FLAGS = {"-m", "--max-time", "--connect-timeout"}
+_PRIVATE_PROBE_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in (
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "::1/128",
+        "fe80::/10",
+    )
+)
 
 
 def _is_safe_lan_probe_context_finding(finding: dict) -> bool:
@@ -975,45 +983,57 @@ def _is_private_lan_readonly_probe(command: str) -> bool:
         return False
 
     executable = os.path.basename(tokens[0])
-    if executable not in {"curl", "wget"}:
+    if executable != "curl":
         return False
 
-    method = "GET"
-    for index, token in enumerate(tokens):
-        if token in _MUTATING_CURL_FLAGS or token in _CREDENTIAL_FLAGS:
-            return False
-        if token.startswith("-d") and token != "--dump-header":
-            return False
-        if token.startswith("-F") or token.startswith("-T"):
-            return False
-        if token in {"-H", "--header", "--proxy-header"} and index + 1 < len(tokens):
-            header = tokens[index + 1].lower()
-            if "authorization:" in header or "cookie:" in header:
+    index = 1
+    seen_urls = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in urls:
+            seen_urls += 1
+        elif token in _SAFE_CURL_LONG_FLAGS:
+            pass
+        elif token in _SAFE_CURL_VALUE_FLAGS:
+            index += 1
+            if index >= len(tokens):
                 return False
-        if token == "-X" and index + 1 < len(tokens):
-            method = tokens[index + 1].upper()
-        elif token.startswith("-X") and len(token) > 2:
-            method = token[2:].upper()
-        elif token.startswith("--request="):
-            method = token.split("=", 1)[1].upper()
-        elif token == "--method" and index + 1 < len(tokens):
-            method = tokens[index + 1].upper()
-        elif token.startswith("--method="):
-            method = token.split("=", 1)[1].upper()
-
-    if method in _MUTATING_METHODS or method not in _READONLY_METHODS:
-        return False
-    return True
+            try:
+                if float(tokens[index]) <= 0:
+                    return False
+            except ValueError:
+                return False
+        elif any(token.startswith(flag + "=") for flag in _SAFE_CURL_VALUE_FLAGS if flag.startswith("--")):
+            try:
+                if float(token.split("=", 1)[1]) <= 0:
+                    return False
+            except ValueError:
+                return False
+        elif token.startswith("-") and not token.startswith("--"):
+            if token.startswith("-m") and len(token) > 2:
+                try:
+                    if float(token[2:]) <= 0:
+                        return False
+                except ValueError:
+                    return False
+            elif not token[1:] or not set(token[1:]) <= _SAFE_CURL_SHORT_FLAGS:
+                return False
+        else:
+            return False
+        index += 1
+    return seen_urls == len(urls)
 
 
 def _is_private_http_probe_url(url: str) -> bool:
     try:
         parsed = urlparse(url)
+        if parsed.username is not None or parsed.password is not None:
+            return False
         host = (parsed.hostname or "").strip("[]")
         ip = ipaddress.ip_address(host)
     except ValueError:
         return False
-    if not (ip.is_private or ip.is_loopback or ip.is_link_local):
+    if not any(ip in network for network in _PRIVATE_PROBE_NETWORKS):
         return False
     path = parsed.path or "/"
     return any(path == allowed or path.startswith(allowed + "/") for allowed in _READONLY_PROBE_PATHS)
