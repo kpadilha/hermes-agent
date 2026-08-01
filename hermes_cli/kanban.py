@@ -371,6 +371,9 @@ def _cmd_create(args: argparse.Namespace) -> int:
             initial_status=getattr(args, "initial_status", "running"),
         )
         task = kb.get_task(conn, task_id)
+        from hermes_cli.kanban_notify import maybe_auto_subscribe_create
+
+        maybe_auto_subscribe_create(conn, task_id)
     if getattr(args, "json", False):
         _print_json(_task_to_dict(task))
     else:
