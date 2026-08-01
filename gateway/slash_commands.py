@@ -337,33 +337,15 @@ class GatewaySlashCommandsMixin(
         text = (event.text or "").strip().lstrip("/")
         if text.startswith("kanban"):
             text = text[len("kanban"):].lstrip()
-        requested_board = action = None
-        tokens = iter(shlex.split(text) if text else [])
-        for tok in tokens:  # leading --board/--board=<b> options, then the action verb
-            if tok == "--board":
-                requested_board = next(tokens, requested_board)
-            elif tok.startswith("--board="):
-                requested_board = tok.split("=", 1)[1]
-            else:
-                action = tok
-                break
         try:
             output = await asyncio.to_thread(run_slash, text)
         except Exception as exc:  # pragma: no cover - defensive
             return t("gateway.kanban.error_prefix", error=exc)
 
-        # Auto-subscribe on create, parsing the task id from the CLI's standard success line
-        # ("Created t_abcd  (ready, ...)"). With --json there is no such line, so a scripting user
-        # gets no subscription and can call /kanban notify-subscribe explicitly.
-        m = re.search(r"Created\s+(t_[0-9a-f]+)\b", output) if action == "create" and output else None
-        if m:
-            task_id = m.group(1)
-            try:
-                if await self._kanban_auto_subscribe(event, task_id, requested_board):
-                    output = output.rstrip() + "\n" + t("gateway.kanban.subscribed_suffix", task_id=task_id)
-            except Exception as exc:
-                logger.warning("kanban create auto-subscribe failed: %s", exc)
-
+        # `run_slash()` now owns create-time auto-subscription for both text
+        # and --json output via the shared CLI helper. Keep the gateway out of
+        # the write path so JSON creates are subscribed and non-JSON creates do
+        # not perform a second idempotent-looking insert/update.
         # Gateway messages have practical length caps; truncate long listings.
         if len(output) > 3800:
             output = output[:3800] + "\n" + t("gateway.kanban.truncated_suffix")
