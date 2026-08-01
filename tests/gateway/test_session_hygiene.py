@@ -512,6 +512,7 @@ async def test_session_hygiene_timeout_continues_to_agent_and_sets_cooldown(monk
     # The DB-backed cooldown check calls this before compressing; a bare
     # MagicMock return would be truthy and skip compression entirely.
     fake_db.get_compression_failure_cooldown.return_value = None
+    fake_db.release_compression_lock.return_value = True
 
     class SlowCompressAgent:
         last_instance = None
@@ -519,6 +520,7 @@ async def test_session_hygiene_timeout_continues_to_agent_and_sets_cooldown(monk
         def __init__(self, **kwargs):
             self.session_id = kwargs.get("session_id", "fake-session")
             self._session_db = kwargs.get("session_db")
+            self._active_compression_lock_holder = "hygiene-holder"
             self._last_compaction_in_place = False
             self.context_compressor = SimpleNamespace(
                 bind_session_state=MagicMock(),
@@ -533,7 +535,13 @@ async def test_session_hygiene_timeout_continues_to_agent_and_sets_cooldown(monk
             self, messages, *_args, commit_fence=None, **_kwargs
         ):
             if commit_fence is not None:
-                commit_fence.register_cancelled_lock_release(lease_released.set)
+                def release_lease():
+                    fake_db.release_compression_lock(
+                        self.session_id, self._active_compression_lock_holder
+                    )
+                    lease_released.set()
+
+                commit_fence.register_cancelled_lock_release(release_lease)
             worker_started.set()
             assert release_worker.wait(timeout=10)
             if commit_fence is not None and not commit_fence.begin_commit():
@@ -634,6 +642,9 @@ async def test_session_hygiene_timeout_continues_to_agent_and_sets_cooldown(monk
     assert len(timeout_warnings) == 1
     fake_db.archive_and_compact.assert_not_called()
     assert lease_released.is_set()
+    fake_db.release_compression_lock.assert_called_once_with(
+        "sess-timeout", "hygiene-holder"
+    )
     # Event/state assertions prove the host returned before the detached
     # worker's event-gated wait completed without a scheduler-sensitive clock
     # bound: cleanup runs only when that worker actually exits.
