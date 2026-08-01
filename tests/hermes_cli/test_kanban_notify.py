@@ -68,13 +68,14 @@ def _assert_inherited_notify_sub(subs: list[dict]) -> None:
 async def test_gateway_create_autosubscribes_on_explicit_board(kanban_home):
     """`/kanban --board <slug> create ...` must subscribe on that board.
 
-    The gateway handler currently auto-subscribes after `/kanban create`,
-    but the create detection must still work when the shared `--board`
-    flag appears before the subcommand, and the subscription must land in
-    that board's DB rather than the ambient/default board.
+    The gateway binds concurrency-safe session context, then delegates to the
+    shared CLI path. Subscription ownership must stay there even when the
+    shared `--board` flag appears before the subcommand, and the subscription
+    must land in that board's DB rather than the ambient/default board.
     """
     from gateway.run import GatewayRunner
     from gateway.config import Platform
+    from gateway.session_context import clear_session_vars, reset_session_vars, set_session_vars
 
     kb.create_board("projx")
 
@@ -93,9 +94,22 @@ async def test_gateway_create_autosubscribes_on_explicit_board(kanban_home):
         reply_to_message_id=None,
     )
 
-    out = await GatewayRunner._handle_kanban_command(runner, event)
+    reset_session_vars()
+    tokens = set_session_vars(
+        platform="telegram",
+        chat_id="chat1",
+        chat_type="dm",
+        thread_id="20197",
+        user_id="u1",
+        message_id="462",
+    )
+    try:
+        out = await GatewayRunner._handle_kanban_command(runner, event)
+    finally:
+        clear_session_vars(tokens)
+        reset_session_vars()
 
-    assert "subscribed" in out.lower()
+    assert out.startswith("Created t_"), out
 
     conn = kb.connect(board="projx")
     try:
