@@ -116,6 +116,126 @@ def test_board_override_is_isolated_per_concurrent_call(kanban_home, monkeypatch
     assert beta_titles == ["beta-task"]
 
 
+def _notify_subs_for(task_id: str, *, board: str | None = None) -> list[dict]:
+    with kb.connect_closing(board=board) as conn:
+        subs = list(kb.list_notify_subs(conn, task_id))
+    out = []
+    for sub in subs:
+        out.append(dict(sub) if isinstance(sub, dict) else sub.__dict__)
+    return out
+
+
+def _bind_gateway_session(**overrides):
+    from gateway.session_context import reset_session_vars, set_session_vars
+
+    reset_session_vars()
+    params = {
+        "platform": "telegram",
+        "chat_id": "chat-42",
+        "chat_type": "dm",
+        "thread_id": "topic-7",
+        "user_id": "user-9",
+        "message_id": "msg-3",
+        "profile": "gateway-profile",
+    }
+    params.update(overrides)
+    return set_session_vars(**params)  # type: ignore[arg-type]
+
+
+def _clear_gateway_session(tokens) -> None:
+    from gateway.session_context import clear_session_vars, reset_session_vars
+
+    clear_session_vars(tokens)
+    reset_session_vars()
+
+
+def test_create_json_auto_subscribes_messaging_origin_and_keeps_stdout_json(kanban_home):
+    tokens = _bind_gateway_session()
+    try:
+        raw = kc.run_slash("create 'json origin task' --assignee worker --json")
+    finally:
+        _clear_gateway_session(tokens)
+
+    payload = json.loads(raw)
+    task_id = payload["id"]
+    assert payload["title"] == "json origin task"
+
+    subs = _notify_subs_for(task_id)
+    assert len(subs) == 1
+    sub = subs[0]
+    assert sub["platform"] == "telegram"
+    assert sub["chat_id"] == "chat-42"
+    assert sub["chat_type"] == "dm"
+    assert sub["thread_id"] == "topic-7"
+    assert sub["user_id"] == "user-9"
+    assert sub["notifier_profile"] == "gateway-profile"
+    assert sub["delivery_metadata"]["chat_type"] == "dm"
+    assert sub["delivery_metadata"]["telegram_reply_to_message_id"] == "msg-3"
+
+
+def test_create_text_auto_subscribes_messaging_origin(kanban_home):
+    tokens = _bind_gateway_session(platform="discord", chat_id="channel-7", thread_id="thread-2")
+    try:
+        raw = kc.run_slash("create 'text origin task' --assignee worker")
+    finally:
+        _clear_gateway_session(tokens)
+
+    assert raw.startswith("Created t_"), raw
+    task_id = raw.split()[1]
+    subs = _notify_subs_for(task_id)
+    assert [(s["platform"], s["chat_id"], s["thread_id"]) for s in subs] == [
+        ("discord", "channel-7", "thread-2")
+    ]
+
+
+def test_create_does_not_subscribe_when_config_disabled(kanban_home):
+    (kanban_home / "config.yaml").write_text(
+        "kanban:\n  auto_subscribe_on_create: false\n"
+    )
+    tokens = _bind_gateway_session()
+    try:
+        payload = json.loads(kc.run_slash("create 'disabled sub task' --json"))
+    finally:
+        _clear_gateway_session(tokens)
+
+    assert _notify_subs_for(payload["id"]) == []
+
+
+def test_create_does_not_subscribe_without_messaging_origin(kanban_home):
+    from gateway.session_context import reset_session_vars
+
+    reset_session_vars()
+    payload = json.loads(kc.run_slash("create 'plain cli task' --json"))
+    assert _notify_subs_for(payload["id"]) == []
+
+
+def test_create_does_not_subscribe_non_messaging_origin(kanban_home):
+    tokens = _bind_gateway_session(platform="api_server", chat_id="request-1")
+    try:
+        payload = json.loads(kc.run_slash("create 'api server task' --json"))
+    finally:
+        _clear_gateway_session(tokens)
+
+    assert _notify_subs_for(payload["id"]) == []
+
+
+def test_create_auto_subscribe_respects_explicit_board(kanban_home):
+    kb.create_board("origin-board")
+    tokens = _bind_gateway_session(platform="slack", chat_id="C123", thread_id="1729.1")
+    try:
+        payload = json.loads(
+            kc.run_slash("--board origin-board create 'board origin task' --json")
+        )
+    finally:
+        _clear_gateway_session(tokens)
+
+    assert _notify_subs_for(payload["id"]) == []
+    subs = _notify_subs_for(payload["id"], board="origin-board")
+    assert [(s["platform"], s["chat_id"], s["thread_id"]) for s in subs] == [
+        ("slack", "C123", "1729.1")
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Integration with the COMMAND_REGISTRY
 # ---------------------------------------------------------------------------
