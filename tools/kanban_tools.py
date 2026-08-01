@@ -18,7 +18,7 @@ from typing import Any, Callable, Optional
 from agent.redact import redact_sensitive_text
 from hermes_cli.goals import judge_goal
 from tools.registry import registry, tool_error
-from hermes_cli.config import cfg_get, load_config
+from hermes_cli.config import load_config
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
@@ -851,71 +851,47 @@ def _handle_create(args: dict, **kw) -> str:
         return _ok(task_id=new_tid, **landed, subscribed=_maybe_auto_subscribe(conn, new_tid))
 
 
-def _resolve_notify_target() -> Optional[dict[str, Any]]:
-    """``kanban_db.add_notify_sub`` kwargs for the calling session, or None (CLI/cron/tests).
-    Gateway sessions: ``HERMES_SESSION_PLATFORM``/``CHAT_ID`` ContextVars. TUI/desktop:
-    those are cleared but the subprocess inherits ``HERMES_SESSION_KEY`` -> ``platform="tui"``
-    for the TUI poller. ``HERMES_SESSION_ID`` is deliberately NOT a fallback: it is set for
-    every CLI/ACP invocation and would auto-subscribe every CLI run."""
-    from gateway.session_context import get_session_env as env
-    platform, chat_id = env("HERMES_SESSION_PLATFORM", ""), env("HERMES_SESSION_CHAT_ID", "")
-    if not platform or not chat_id:
-        session_key = env("HERMES_SESSION_KEY", "") or os.environ.get("HERMES_SESSION_KEY", "")
-        if not session_key:
-            return None
-        platform, chat_id = "tui", session_key
-    chat_type = env("HERMES_SESSION_CHAT_TYPE", "") or None
-    thread_id = env("HERMES_SESSION_THREAD_ID", "") or None
-    message_id = env("HERMES_SESSION_MESSAGE_ID", "") or ""
-    notifier_profile = env("HERMES_SESSION_PROFILE", "") or os.environ.get("HERMES_PROFILE")
-    if not notifier_profile:
-        try:
-            from hermes_cli.profiles import get_active_profile_name
-            notifier_profile = get_active_profile_name() or "default"
-        except Exception:
-            notifier_profile = "default"
-    delivery_metadata: dict[str, Any] = {
-        k: v for k, v in (("thread_id", thread_id), ("chat_type", chat_type)) if v}
-    if (platform.lower() == "telegram" and thread_id
-            and (chat_type or "").lower() in {"dm", "direct", "private"}):
-        delivery_metadata["telegram_dm_topic_reply_fallback"] = True
-        if str(thread_id) not in {"", "1"}:
-            delivery_metadata["direct_messages_topic_id"] = str(thread_id)
-        if message_id:
-            delivery_metadata["telegram_reply_to_message_id"] = str(message_id)
-    return dict(
-        platform=platform, chat_id=chat_id, chat_type=chat_type, thread_id=thread_id,
-        user_id=env("HERMES_SESSION_USER_ID", "") or None,
-        user_id_alt=env("HERMES_SESSION_USER_ID_ALT", "") or None,
-        notifier_profile=notifier_profile,
-        delivery_mode="notify+wake" if platform != "tui" else None,
-        delivery_metadata=delivery_metadata or None)
-
-
 def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
-    """Subscribe the calling session to completion/block events; True iff a row was
-    written (surfaced as ``subscribed`` so an orchestrator can fall back to explicit
-    ``kanban_notify-subscribe``). Gated by ``kanban.auto_subscribe_on_create`` (default
-    True). Failures are logged and swallowed: bookkeeping must never fail kanban_create."""
-    try:
-        if not cfg_get(load_config(), "kanban", "auto_subscribe_on_create", default=True):
-            return False
-    except Exception:
-        pass  # unreadable config keeps the user-friendly default (True)
-    target = None
-    try:
-        target = _resolve_notify_target()
-        if target is None:
-            return False  # CLI / cron / test — no persistent channel
-        from hermes_cli import kanban_db as _kb
-        from hermes_cli import kanban_db_notify as _kbn
-        _kbn.add_notify_sub(conn, task_id=task_id, **target)
-        return True
-    except Exception as _exc:
-        logger.warning(
-            "_maybe_auto_subscribe failed: %r (platform=%r key_set=%r)",
-            _exc, target["platform"] if target else "", bool(target and target["chat_id"]))
-        return False
+    """Auto-subscribe the calling session to task completion / block events.
+
+    Returns True if a subscription row was written, False otherwise (no
+    session context, config gate disabled, or best-effort failure). The
+    caller surfaces this in the ``subscribed`` field of the kanban_create
+    response so an orchestrator can decide whether to fall back to an
+    explicit ``kanban_notify-subscribe`` or to polling.
+
+    Gated by ``kanban.auto_subscribe_on_create`` in config.yaml (default
+    True). Disable to mirror pre-feature behaviour, e.g. when the
+    originating user/chat opted out via the per-platform notification
+    toggle (see ``hermes dashboard``).
+
+    Subscription paths:
+
+    - **Gateway** (telegram/discord/slack/etc): ``HERMES_SESSION_PLATFORM``,
+      ``HERMES_SESSION_CHAT_ID``, and ``HERMES_SESSION_CHAT_TYPE`` are set in
+      ContextVars by the messaging gateway before agent dispatch. The
+      notification poller already keys off these, so we just register a row.
+
+    - **TUI** (herm desktop / herm TUI): the platform/chat_id ContextVars
+      are intentionally cleared (TUI is a single-channel local UI, not
+      a multi-tenant chat surface), but the agent subprocess inherits
+      ``HERMES_SESSION_KEY`` from the parent session. We subscribe with
+      ``platform="tui"`` and ``chat_id=<key>``; the TUI notification
+      poller (``tui_gateway/server.py``) reads ``kanban_notify_subs``
+      for these rows and posts the completion message into the running
+      session.
+
+    - **CLI / cron / test / unattached**: no persistent delivery channel,
+      no-op.
+
+    Failure mode: any exception inside the function is logged at WARNING
+    with the offending exception + diagnostic env vars and swallowed.
+    We never want a notification bookkeeping failure to fail the
+    kanban_create that the agent is mid-conversation about.
+    """
+    from hermes_cli.kanban_notify import maybe_auto_subscribe_create
+
+    return maybe_auto_subscribe_create(conn, task_id)
 
 
 @_kanban_handler("kanban_unblock")
