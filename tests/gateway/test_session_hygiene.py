@@ -495,6 +495,7 @@ async def test_session_hygiene_timeout_continues_to_agent_and_sets_cooldown(monk
     # The DB-backed cooldown check calls this before compressing; a bare
     # MagicMock return would be truthy and skip compression entirely.
     fake_db.get_compression_failure_cooldown.return_value = None
+    fake_db.release_compression_lock.return_value = True
 
     class SlowCompressAgent:
         last_instance = None
@@ -502,6 +503,7 @@ async def test_session_hygiene_timeout_continues_to_agent_and_sets_cooldown(monk
         def __init__(self, **kwargs):
             self.session_id = kwargs.get("session_id", "fake-session")
             self._session_db = kwargs.get("session_db")
+            self._active_compression_lock_holder = "hygiene-holder"
             self._last_compaction_in_place = False
             self.context_compressor = SimpleNamespace(
                 bind_session_state=MagicMock(),
@@ -621,6 +623,9 @@ async def test_session_hygiene_timeout_continues_to_agent_and_sets_cooldown(monk
     timeout_warnings = [s for s in adapter.sent if "Context compression timed out" in s["content"]]
     assert len(timeout_warnings) == 1
     fake_db.archive_and_compact.assert_not_called()
+    fake_db.release_compression_lock.assert_called_once_with(
+        "sess-timeout", "hygiene-holder"
+    )
     SlowCompressAgent.last_instance.close.assert_not_called()
 
     release_worker.set()
