@@ -671,6 +671,12 @@ DEFAULT_CONFIG = {
         # already at/below threshold × target_ratio; honors the same cooldown/ anti-thrash/lock
         # guards. Example: 1800 = 30 min.
         "idle_compact_after_seconds": 0,
+        "relevance_pinning": {       # Optional lexical MVP: select reference-only
+            "enabled": False,        # older middle-window excerpts for the summarizer.
+            "max_pins": 8,
+            "max_pin_chars_total": 12000,
+            "min_score": 3,
+        },
     },
     # Anthropic prompt caching (Claude via OpenRouter or native API). cache_ttl: "5m" | "1h" | "auto"
     # (auto = 1h for human-paced sessions — cli/tui/desktop/messaging — and 5m for subagent, cron,
@@ -1756,6 +1762,14 @@ DEFAULT_CONFIG = {
         # enabled (e.g. `elevenlabs`). False = require explicit pip install for everything beyond
         # the base set (restricted/audited/air-gapped environments).
         "allow_lazy_installs": True,
+        "gliguard": {
+            "enabled": False,
+            "mode": "shadow",
+            "url": "http://127.0.0.1:8766/moderate",
+            "timeout_ms": 500,
+            "fail_open": True,
+            "shadow_log_path": "",
+        },
     },
 
     "cron": {
