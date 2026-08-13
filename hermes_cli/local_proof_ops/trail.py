@@ -98,6 +98,11 @@ relacionados: ["[[hermes-memory-architecture]]"]
 
 {final_state.strip() or "No final state recorded."}
 
+## Graph context
+
+- [[niko/operations/proofs/00-proof-ledger|Niko Proof Ledger]]
+- [[niko/operations/00-operations-hub|Niko Operations Hub]]
+
 ## Histórico
 
 - **{timestamp[:10]}** — Proof artifact created for autonomous task execution.
