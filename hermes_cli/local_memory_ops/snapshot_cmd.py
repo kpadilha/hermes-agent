@@ -245,6 +245,11 @@ def memory_snapshot_command(
                 "",
                 recall_text or "No recall result.",
                 "",
+                "## Graph context",
+                "",
+                "- [[niko/operations/memory-snapshots/README|Memory Snapshots Index]]",
+                "- [[niko/operations/00-operations-hub|Niko Operations Hub]]",
+                "",
             ]
         ),
         encoding="utf-8",
