@@ -45,6 +45,7 @@ def test_build_proof_markdown_contains_required_sections():
         "## KB Promotion",
         "## LCM / Context References",
         "## Final State",
+        "## Graph context",
     ]:
         assert heading in markdown
     assert "status: \"validated\"" in markdown
