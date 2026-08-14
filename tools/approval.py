@@ -1008,6 +1008,29 @@ def check_all_command_guards(command: str, env_type: str,
     # Gather findings: warnings = [(pattern_key, description, is_tirith)]. Tirith block AND warn both go through the
     # approval flow (block used to be a hard stop) so users can inspect the findings and approve.
     tirith_result = _tirith_scan(command)
+
+    # A pipe into an interpreter always has a safe staged equivalent. Do not
+    # strand unattended agents behind a human approval prompt: reject this
+    # command shape and tell the agent to reformulate the same goal safely.
+    if tirith_result["action"] in {"block", "warn"} and any(
+        finding.get("rule_id") == "pipe_to_interpreter"
+        for finding in (tirith_result.get("findings") or [])
+    ):
+        return {
+            "approved": False,
+            "message": (
+                "BLOCKED for safe reformulation: do not pipe command output into "
+                "an interpreter. Retry the same non-destructive goal using separate "
+                "tool calls: inspect/parse the tool result directly, or write output "
+                "to a temporary file and parse that file in a second call. Do not "
+                "request human approval for this reformulable command shape."
+            ),
+            "pattern_key": "tirith:pipe_to_interpreter",
+            "description": _format_tirith_description(tirith_result),
+            "outcome": "reformulate",
+            "retryable": True,
+        }
+
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
     warnings = []
     session_key = get_current_session_key()
