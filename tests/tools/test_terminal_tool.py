@@ -1,5 +1,7 @@
 """Regression tests for sudo detection and sudo password handling."""
 
+import json
+
 import tools.terminal_tool as terminal_tool
 
 
@@ -28,6 +30,27 @@ def test_terminal_schema_advertises_persistent_env_state():
     assert "exported environment variables persist between calls" in description
     assert "activate a virtualenv" in description
     assert "once per session" in description
+
+
+def test_reformulate_guard_metadata_reaches_agent(monkeypatch):
+    monkeypatch.setattr(
+        terminal_tool,
+        "_check_all_guards",
+        lambda *_args, **_kwargs: {
+            "approved": False,
+            "message": "retry with separate tool calls",
+            "description": "pipe to interpreter",
+            "outcome": "reformulate",
+            "retryable": True,
+        },
+    )
+
+    result = json.loads(terminal_tool.terminal_tool("printf safe"))
+
+    assert result["status"] == "blocked"
+    assert result["outcome"] == "reformulate"
+    assert result["retryable"] is True
+    assert "separate tool calls" in result["error"]
 
 
 def test_printf_literal_sudo_does_not_trigger_rewrite(monkeypatch):
