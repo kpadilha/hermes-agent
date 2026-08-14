@@ -16,6 +16,7 @@ import hashlib
 import importlib
 import logging
 import os
+import re
 import threading
 from typing import Optional
 
@@ -1131,17 +1132,39 @@ def check_all_command_guards(command: str, env_type: str,
     if _command_matches_permanent_allowlist(command):
         return _approved()
 
+    is_dangerous, pattern_key, description = detect_dangerous_command(command)
+    # ponytail: upstream removed Tirith; reuse its quote-aware shell scanner rather
+    # than restoring the dependency. Other dangerous pipelines keep the normal gate.
+    if not is_dangerous or description == "script execution via -e/-c flag":
+        from tools.approval_detection import _scan_shell
+        for kind, i, _, quote in _scan_shell(command, comments=True):
+            if (kind == "char" and quote is None and command[i] == "|"
+                    and command[i:i + 2] not in ("||", "|&")
+                    and (i == 0 or command[i - 1] != "|")
+                    and re.match(r"\s*(?:[\w./-]*/)?(?:python(?:\d+(?:\.\d+)?)?|node|bash|sh|zsh|dash|ksh)\b",
+                                 command[i + 1:])):
+                return {
+                    "approved": False,
+                    "message": (
+                        "BLOCKED for safe reformulation: do not pipe command output into "
+                        "an interpreter. Retry the same non-destructive goal using separate "
+                        "tool calls: inspect/parse the tool result directly, or write output "
+                        "to a temporary file and parse that file in a second call. Do not "
+                        "request human approval for this reformulable command shape."
+                    ),
+                    "pattern_key": "pipe_to_interpreter",
+                    "description": "pipe to interpreter",
+                    "outcome": "reformulate",
+                    "retryable": True,
+                }
     approval_callback, is_cli, is_gateway, is_ask = _presence(approval_callback)
-    # Outside CLI/gateway/ask flows we never block on approvals: each
-    # unattended context applies its configured deny/approve mode, else allow.
+    # Outside CLI/gateway/ask flows we never block on approvals.
     if not is_cli and not is_gateway and not is_ask:
         for ctx in _unattended_contexts():
             result = _unattended_deny(command, ctx)
             if result is not None:
                 return result
         return _approved()
-
-    is_dangerous, pattern_key, description = detect_dangerous_command(command)
     session_key = get_current_session_key()
     if not is_dangerous or is_approved(session_key, pattern_key):
         return _approved()
