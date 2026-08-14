@@ -4219,7 +4219,7 @@ _WATCHDOG_EXIT_REASONS = {
 
 def _load_runtime_health_state() -> dict | None:
     try:
-        from gateway.status import read_runtime_status, runtime_status_is_stale, runtime_status_pid_is_live
+        from gateway.status import read_runtime_status
     except Exception:
         return None
     return read_runtime_status() or None
