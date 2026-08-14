@@ -3033,12 +3033,16 @@ def terminal_tool(
                     f"Command denied: {desc}. "
                     "Use the approval prompt to allow it, or rephrase the command."
                 )
-                return json.dumps({
+                blocked = {
                     "output": "",
                     "exit_code": -1,
                     "error": approval.get("message", fallback_msg),
-                    "status": "blocked"
-                }, ensure_ascii=False)
+                    "status": "blocked",
+                }
+                for key in ("outcome", "retryable"):
+                    if key in approval:
+                        blocked[key] = approval[key]
+                return json.dumps(blocked, ensure_ascii=False)
             # Track whether approval was explicitly granted by the user
             if approval.get("user_approved"):
                 desc = approval.get("description", "flagged as dangerous")
