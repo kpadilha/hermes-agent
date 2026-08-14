@@ -108,13 +108,42 @@ class TestTirithAllowSafeCommand:
 # ---------------------------------------------------------------------------
 
 class TestTirithBlock:
-    """Tirith 'block' is now treated as an approvable warning (not a hard block).
+    """Tirith 'block' is normally treated as an approvable warning."""
 
-    Users are prompted with the tirith findings and can approve if they
-    understand the risk.  The prompt defaults to deny, so if no input is
-    provided the command is still blocked — but through the approval flow,
-    not a hard block bypass.
-    """
+    @pytest.mark.parametrize(
+        ("action", "findings"),
+        [
+            ("block", [{"rule_id": "pipe_to_interpreter"}]),
+            (
+                "warn",
+                [
+                    {"rule_id": "unrelated"},
+                    {"rule_id": "pipe_to_interpreter"},
+                ],
+            ),
+        ],
+    )
+    def test_pipe_to_interpreter_is_returned_for_safe_reformulation(
+        self, action, findings
+    ):
+        os.environ["HERMES_INTERACTIVE"] = "1"
+        cb = MagicMock(return_value="once")
+
+        with patch(
+            _TIRITH_PATCH,
+            return_value=_tirith_result(action, findings, "pipe to interpreter"),
+        ):
+            result = check_all_command_guards(
+                "hermes kanban list --json | python3 -c 'import json'",
+                "local",
+                approval_callback=cb,
+            )
+
+        assert result["approved"] is False
+        assert result["outcome"] == "reformulate"
+        assert result["retryable"] is True
+        assert "separate tool calls" in result["message"]
+        cb.assert_not_called()
 
     @patch(_TIRITH_PATCH,
            return_value=_tirith_result("block", summary="homograph detected"))
