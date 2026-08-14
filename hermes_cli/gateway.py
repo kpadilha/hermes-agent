@@ -6030,11 +6030,7 @@ def _platform_status(platform: dict) -> str:
 
 def _load_runtime_health_state() -> dict | None:
     try:
-        from gateway.status import (
-            read_runtime_status,
-            runtime_status_is_stale,
-            runtime_status_pid_is_live,
-        )
+        from gateway.status import read_runtime_status
     except Exception:
         return None
     return read_runtime_status() or None
@@ -6400,6 +6396,8 @@ def print_gateway_health(system: bool = False, json_output: bool = False) -> Non
 
 def _runtime_health_lines() -> list[str]:
     """Summarize the latest persisted gateway runtime health state."""
+    from gateway.status import runtime_status_is_stale, runtime_status_pid_is_live
+
     state = _load_runtime_health_state()
     if not state:
         return []
