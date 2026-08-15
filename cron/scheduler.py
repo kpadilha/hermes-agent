@@ -311,31 +311,24 @@ class CronPromptInjectionBlocked(Exception):
     """
 
 
-def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
-    """Toolsets a cron-spawned agent must never receive.
+def _resolve_cron_disabled_toolsets(cfg: Any, job: Any = None) -> list[str]:
+    """Resolve policy and user-denied toolsets for a cron-spawned agent.
 
-    Three toolsets are always disabled in cron context regardless of config:
-      - ``messaging`` — interactive, needs a live gateway session
-      - ``clarify`` — interactive, blocks waiting for user input
-      - ``memory`` — cron agents are constructed with ``skip_memory=True``, so
-        exposing this tool only gives the model an unbacked tool that fails
+    ``messaging`` and ``clarify`` remain unavailable because cron has no live
+    interaction loop. ``memory`` is denied by default, but a persisted
+    job-scoped memory toolset explicitly exposes the built-in file-backed
+    memory tool. User-level ``agent.disabled_toolsets`` always wins.
 
     ``cronjob`` is policy-denied by default (loop prevention, not a security
-    boundary) and config-gated: setting ``cron.allow_agent_scheduling: true``
-    in config.yaml drops it from the base denylist so cron-spawned agents may
-    manage the user's cron table. The gate only removes the built-in policy
-    denial — it never overrides the user denylist below.
-
-    User-level ``agent.disabled_toolsets`` from config.yaml is layered on top
-    so per-job ``enabled_toolsets`` cannot bypass policy that applies to
-    ordinary agent runs (#25752 — LLM-supplied enabled_toolsets was widening
-    past config.yaml's denylist).
+    boundary) and config-gated by ``cron.allow_agent_scheduling``.
     """
     cron_cfg = (cfg or {}).get("cron") or {}
     if cron_cfg.get("allow_agent_scheduling"):
-        disabled = ["messaging", "clarify", "memory"]
+        disabled = ["messaging", "clarify"]
     else:
-        disabled = ["cronjob", "messaging", "clarify", "memory"]
+        disabled = ["cronjob", "messaging", "clarify"]
+    if not _cron_allows_built_in_memory(job or {}):
+        disabled.append("memory")
     agent_cfg = (cfg or {}).get("agent") or {}
     user_disabled = agent_cfg.get("disabled_toolsets") or []
     for name in user_disabled:
@@ -375,16 +368,14 @@ def _merge_mcp_into_per_job_toolsets(per_job: list[str], cfg: dict) -> list[str]
             result.append(name)
     return result
 def _cron_allows_built_in_memory(job: dict) -> bool:
-    """Return whether this cron agent may load the built-in memory store.
+    """Return whether this cron agent explicitly opted into built-in memory.
 
-    Cron agents default to ``skip_memory=True`` because scheduled prompts are
-    unattended and can otherwise pollute curated USER/MEMORY context. A small
-    number of explicitly governed maintenance jobs need the memory tool as the
-    whole point of the job; those jobs must opt in with a persisted
-    ``allow_memory``/``enable_memory`` flag and a job-scoped memory toolset.
+    Cron agents keep ``skip_memory=True`` so external memory providers and
+    automatic memory context remain off. ``AIAgent`` still instantiates its
+    built-in file-backed store when the job explicitly requests the ``memory``
+    toolset. Per-job toolsets are persisted by the cron job API and cannot be
+    inherited from the global cron platform toolset.
     """
-    if not bool(job.get("allow_memory") or job.get("enable_memory")):
-        return False
     toolsets = job.get("enabled_toolsets") or []
     return "memory" in {str(t).strip() for t in toolsets}
 
@@ -5180,7 +5171,9 @@ def run_job(
             provider_sort=pr.get("sort"),
             openrouter_min_coding_score=(_cfg.get("openrouter") or {}).get("min_coding_score"),
             enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
-            disabled_toolsets=_resolve_cron_disabled_toolsets(_cfg),
+            disabled_toolsets=_resolve_cron_disabled_toolsets(
+                _cfg, job if isinstance(job, dict) else {}
+            ),
             quiet_mode=True,
             # Cron jobs should always inherit the user's SOUL.md identity from
             # HERMES_HOME. When a workdir is configured, also inject project
@@ -5189,7 +5182,9 @@ def run_job(
             skip_context_files=not bool(_job_workdir),
             load_soul_identity=True,
             skip_background_review=True,  # Cron has no human-in-the-loop need for skill/memory review forks (~30K tok/event)
-            skip_memory=not _cron_allows_built_in_memory(job),  # default off for cron; explicit opt-in for governed memory jobs
+            # Keep external providers/context off. AIAgent still initializes the
+            # built-in file-backed store when enabled_toolsets includes memory.
+            skip_memory=True,
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,
