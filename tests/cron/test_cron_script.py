@@ -42,19 +42,19 @@ def cron_env(tmp_path, monkeypatch):
 
 
 class TestCronMemoryOptIn:
-    """Cron memory is disabled by default and only enabled by explicit opt-in."""
+    """Cron memory is disabled by default and enabled by a job-scoped toolset opt-in."""
 
-    def test_cron_memory_disabled_without_explicit_flag(self):
+    def test_cron_memory_disabled_without_job_scoped_toolset(self):
         from cron.scheduler import _cron_allows_built_in_memory
 
-        assert _cron_allows_built_in_memory({"enabled_toolsets": ["memory"]}) is False
-        assert _cron_allows_built_in_memory({"allow_memory": True, "enabled_toolsets": ["terminal"]}) is False
+        assert _cron_allows_built_in_memory({}) is False
+        assert _cron_allows_built_in_memory({"enabled_toolsets": ["terminal"]}) is False
 
-    def test_cron_memory_enabled_with_flag_and_toolset(self):
+    def test_cron_memory_enabled_by_persisted_job_toolset(self):
         from cron.scheduler import _cron_allows_built_in_memory
 
-        assert _cron_allows_built_in_memory({"allow_memory": True, "enabled_toolsets": ["memory"]}) is True
-        assert _cron_allows_built_in_memory({"enable_memory": True, "enabled_toolsets": ["terminal", "memory"]}) is True
+        assert _cron_allows_built_in_memory({"enabled_toolsets": ["memory"]}) is True
+        assert _cron_allows_built_in_memory({"enabled_toolsets": ["file", "memory"]}) is True
 
 
 class TestJobScriptField:
