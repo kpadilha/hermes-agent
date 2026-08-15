@@ -50,6 +50,16 @@ def _jwt_with_exp(exp_epoch: int) -> str:
     return f"h.{encoded}.s"
 
 
+def _jwt_for_account(account_id: str, marker: str) -> str:
+    payload = {
+        "exp": int(time.time()) + 3600,
+        "marker": marker,
+        "https://api.openai.com/auth": {"chatgpt_account_id": account_id},
+    }
+    encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+    return f"h.{encoded}.s"
+
+
 
 
 
@@ -347,6 +357,33 @@ def test_save_codex_tokens_syncs_manual_device_code_entries(tmp_path, monkeypatc
     api_key = next(e for e in pool if e["source"] == "manual:api_key")
     assert api_key["access_token"] == "user-api-key"
     assert "refresh_token" not in api_key or api_key.get("refresh_token") is None
+
+
+def test_save_codex_tokens_syncs_distinct_tokens_for_same_chatgpt_account(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True)
+    old_singleton = _jwt_for_account("account-A", "singleton-old")
+    same_account = _jwt_for_account("account-A", "manual-old")
+    independent = _jwt_for_account("account-B", "independent")
+    fresh = _jwt_for_account("account-A", "fresh")
+    (hermes_home / "auth.json").write_text(json.dumps({
+        "version": 1,
+        "providers": {"openai-codex": {"tokens": {
+            "access_token": old_singleton, "refresh_token": "old-rt",
+        }}},
+        "credential_pool": {"openai-codex": [
+            {"id": "seeded", "source": "device_code", "access_token": old_singleton, "refresh_token": "old-rt"},
+            {"id": "same-account", "source": "manual:device_code", "access_token": same_account, "refresh_token": "same-rt"},
+            {"id": "independent", "source": "manual:device_code", "access_token": independent, "refresh_token": "other-rt"},
+        ]},
+    }))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    _save_codex_tokens({"access_token": fresh, "refresh_token": "fresh-rt"})
+
+    entries = json.loads((hermes_home / "auth.json").read_text())["credential_pool"]["openai-codex"]
+    assert next(e for e in entries if e["id"] == "same-account")["access_token"] == fresh
+    assert next(e for e in entries if e["id"] == "independent")["access_token"] == independent
 
 
 def test_save_codex_tokens_does_not_overwrite_independent_manual_entries(tmp_path, monkeypatch):
