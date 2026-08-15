@@ -344,6 +344,11 @@ def get_tool_definitions(
     Returns:
         Filtered list of OpenAI-format tool definitions.
     """
+    # Agent construction can outlive a transient built-in import failure during
+    # process startup. Re-run idempotent discovery before taking each snapshot
+    # so a later agent does not permanently lose that tool for this process.
+    discover_builtin_tools()
+
     # Fast path: memoized result when the caller doesn't need stdout prints.
     # The cache key captures every argument-level input; the registry
     # generation captures registry mutations (MCP refresh, plugin load).
