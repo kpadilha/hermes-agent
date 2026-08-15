@@ -218,19 +218,17 @@ def get_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disabled_
     skip_tool_search_assembly returns raw schemas for every enabled tool — only
     the tool_search bridge should use it (it reads the real, uncollapsed catalog).
     """
+    # Agent construction can outlive a transient built-in import failure during
+    # process startup. Re-run idempotent discovery before taking each snapshot
+    # so a later agent does not permanently lose that tool for this process.
+    discover_builtin_tools()
+
     def compute():
         return _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
                                          skip_tool_search_assembly=skip_tool_search_assembly)
     if not quiet_mode:
         return compute()
     cache_key = _tool_defs_cache_key(enabled_toolsets, disabled_toolsets, skip_tool_search_assembly)
-    # Cache the freshly-computed list, but hand callers a shallow copy so downstream mutations (e.g.
-    # run_agent appending memory/LCM tool schemas to self.tools) don't poison the cache. Without this, a
-    # long-lived Gateway process accumulates duplicate tool names across agent inits and providers that
-    # enforce unique tool names (DeepSeek, Xiaomi MiMo, Moonshot Kimi) reject the request with HTTP 400.
-    # Mirrors the cache-hit path above. (issue #17335) Bound the cache with LRU eviction so a long-lived
-    # Gateway process doesn't accumulate entries unboundedly across the many distinct toolset/config
-    # fingerprints it sees over its lifetime (#19251).
     with _tool_defs_cache_lock:
         cached = _tool_defs_cache.get(cache_key) if cache_key is not None else None
     if cached is None:
