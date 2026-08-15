@@ -1,6 +1,8 @@
 """Tests for Codex auth — tokens stored in Hermes auth store (~/.hermes/auth.json)."""
 
+import base64
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +39,26 @@ def _setup_hermes_auth(hermes_home: Path, *, access_token: str = "access", refre
     auth_file = hermes_home / "auth.json"
     auth_file.write_text(json.dumps(auth_store, indent=2))
     return auth_file
+
+
+def _jwt_with_exp(exp_epoch: int) -> str:
+    payload = {"exp": exp_epoch}
+    encoded = base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).rstrip(b"=").decode("utf-8")
+    return f"h.{encoded}.s"
+
+
+def _jwt_for_account(account_id: str, marker: str) -> str:
+    payload = {
+        "exp": int(time.time()) + 3600,
+        "marker": marker,
+        "https://api.openai.com/auth": {"chatgpt_account_id": account_id},
+    }
+    encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+    return f"h.{encoded}.s"
+
+
+
+
 
 
 def test_resolve_codex_runtime_credentials_missing_access_token(tmp_path, monkeypatch):
@@ -332,6 +354,132 @@ def test_save_codex_tokens_syncs_manual_device_code_entries(tmp_path, monkeypatc
     api_key = next(e for e in pool if e["source"] == "manual:api_key")
     assert api_key["access_token"] == "user-api-key"
     assert "refresh_token" not in api_key or api_key.get("refresh_token") is None
+
+
+def test_save_codex_tokens_syncs_distinct_tokens_for_same_chatgpt_account(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True)
+    old_singleton = _jwt_for_account("account-A", "singleton-old")
+    same_account = _jwt_for_account("account-A", "manual-old")
+    independent = _jwt_for_account("account-B", "independent")
+    fresh = _jwt_for_account("account-A", "fresh")
+    (hermes_home / "auth.json").write_text(json.dumps({
+        "version": 1,
+        "providers": {"openai-codex": {"tokens": {
+            "access_token": old_singleton, "refresh_token": "old-rt",
+        }}},
+        "credential_pool": {"openai-codex": [
+            {"id": "seeded", "source": "device_code", "access_token": old_singleton, "refresh_token": "old-rt"},
+            {"id": "same-account", "source": "manual:device_code", "access_token": same_account, "refresh_token": "same-rt"},
+            {"id": "independent", "source": "manual:device_code", "access_token": independent, "refresh_token": "other-rt"},
+        ]},
+    }))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    _save_codex_tokens({"access_token": fresh, "refresh_token": "fresh-rt"})
+
+    entries = json.loads((hermes_home / "auth.json").read_text())["credential_pool"]["openai-codex"]
+    assert next(e for e in entries if e["id"] == "same-account")["access_token"] == fresh
+    assert next(e for e in entries if e["id"] == "independent")["access_token"] == independent
+
+
+def test_save_codex_tokens_does_not_overwrite_independent_manual_entries(tmp_path, monkeypatch):
+    """Re-auth must NOT overwrite ``manual:device_code`` entries that hold
+    independent token material (different OpenAI/ChatGPT accounts).
+
+    Regression for #39236: ``hermes auth add openai-codex`` for accounts B and C
+    routes through ``_save_codex_tokens`` because the singleton path is the
+    only Codex OAuth save flow.  The #33538 fix refreshed every
+    ``manual:device_code`` entry on every re-auth, which works fine for the
+    one-account/legacy-workaround case but silently overwrote distinct
+    independent accounts with the latest-authenticated tokens (labels
+    preserved, token material clobbered, status/quota readings then lie).
+
+    The safe invariant: an entry is a singleton-alias only when its current
+    access_token matches the *previous* singleton access_token.  Manual
+    entries whose tokens never matched the singleton are independent accounts
+    and must be left alone.
+    """
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    (hermes_home / "auth.json").write_text(json.dumps({
+        "version": 1,
+        "providers": {
+            "openai-codex": {
+                # Old singleton tokens — represent "account A" which the user
+                # logged in with via setup originally.
+                "tokens": {"access_token": "acctA-at", "refresh_token": "acctA-rt"},
+                "last_refresh": "2026-01-01T00:00:00Z",
+                "auth_mode": "chatgpt",
+                "label": "account-A",
+            },
+        },
+        "credential_pool": {
+            "openai-codex": [
+                # The seeded singleton mirror of account A.
+                {
+                    "id": "seeded",
+                    "label": "account-A",
+                    "source": "device_code",
+                    "auth_type": "oauth",
+                    "access_token": "acctA-at",
+                    "refresh_token": "acctA-rt",
+                },
+                # Two INDEPENDENT manual entries added later via
+                # ``hermes auth add openai-codex`` (account B and account C).
+                # Each has its OWN distinct token material, unrelated to the
+                # singleton.
+                {
+                    "id": "acctB",
+                    "label": "account-B",
+                    "source": "manual:device_code",
+                    "auth_type": "oauth",
+                    "access_token": "acctB-at",
+                    "refresh_token": "acctB-rt",
+                },
+                {
+                    "id": "acctC",
+                    "label": "account-C",
+                    "source": "manual:device_code",
+                    "auth_type": "oauth",
+                    "access_token": "acctC-at",
+                    "refresh_token": "acctC-rt",
+                },
+            ],
+        },
+    }))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    # User re-authenticates account A — fresh device-code login produces new
+    # tokens.  The legitimate update is the seeded singleton mirror; the
+    # independent acctB/acctC entries must be untouched.
+    _save_codex_tokens(
+        {"access_token": "acctA-new-at", "refresh_token": "acctA-new-rt"},
+        last_refresh="2026-06-05T00:00:00Z",
+    )
+
+    auth = json.loads((hermes_home / "auth.json").read_text())
+    pool = auth["credential_pool"]["openai-codex"]
+
+    # Singleton-seeded entry: refreshed (legitimate sync).
+    seeded = next(e for e in pool if e["source"] == "device_code")
+    assert seeded["access_token"] == "acctA-new-at"
+    assert seeded["refresh_token"] == "acctA-new-rt"
+    assert seeded["last_refresh"] == "2026-06-05T00:00:00Z"
+
+    # acctB: INDEPENDENT entry — must NOT be overwritten.
+    acctB = next(e for e in pool if e["id"] == "acctB")
+    assert acctB["access_token"] == "acctB-at", (
+        "acctB was clobbered by acctA re-auth (#39236 regression)"
+    )
+    assert acctB["refresh_token"] == "acctB-rt"
+
+    # acctC: INDEPENDENT entry — must NOT be overwritten.
+    acctC = next(e for e in pool if e["id"] == "acctC")
+    assert acctC["access_token"] == "acctC-at", (
+        "acctC was clobbered by acctA re-auth (#39236 regression)"
+    )
+    assert acctC["refresh_token"] == "acctC-rt"
 
 
 def test_save_codex_tokens_clears_error_markers_only_on_refreshed_entries(tmp_path, monkeypatch):
