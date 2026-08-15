@@ -3771,6 +3771,13 @@ def _sync_codex_pool_entries(
     prev_at = None
     if isinstance(previous_singleton_tokens, dict):
         prev_at = previous_singleton_tokens.get("access_token") or None
+    fresh_claims = _decode_jwt_claims(access_token)
+    fresh_auth = fresh_claims.get("https://api.openai.com/auth")
+    fresh_account_id = (
+        fresh_auth.get("chatgpt_account_id")
+        if isinstance(fresh_auth, dict)
+        else None
+    )
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -3779,13 +3786,22 @@ def _sync_codex_pool_entries(
             # Singleton-seeded mirror — always refresh.
             refresh_this_entry = True
         elif source == "manual:device_code":
-            # Refresh only if this entry's existing access_token matches the
-            # previous singleton access_token (i.e. it is a true alias of the
-            # singleton from the #33000 workaround era).  An entry with its
-            # own distinct token material is an independent account and must
-            # be left alone (#39236).
+            entry_claims = _decode_jwt_claims(entry.get("access_token"))
+            entry_auth = entry_claims.get("https://api.openai.com/auth")
+            entry_account_id = (
+                entry_auth.get("chatgpt_account_id")
+                if isinstance(entry_auth, dict)
+                else None
+            )
+            # Token equality catches legacy aliases. Account identity also
+            # catches same-account tokens independently rotated by Codex CLI.
+            # A distinct ChatGPT account remains isolated (#39236).
             refresh_this_entry = bool(
                 prev_at and entry.get("access_token") == prev_at
+            ) or bool(
+                fresh_account_id
+                and entry_account_id
+                and fresh_account_id == entry_account_id
             )
         else:
             # ``manual:api_key`` and any future non-device-code sources.
