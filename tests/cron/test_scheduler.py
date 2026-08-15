@@ -628,14 +628,8 @@ class TestRunJobSessionPersistence:
             "memory toolset should be disabled in cron to match skip_memory=True"
         )
 
-    def test_run_job_disables_memory_even_when_per_job_enables_it(self, tmp_path):
-        """Cron runs pass skip_memory=True, so memory must not be exposed.
-
-        A cron job can request the memory tool through enabled_toolsets, but
-        there is no MemoryStore injected for cron agents.  Keep memory in the
-        disabled set so AIAgent filters the unbacked tool out before the model
-        can call it and receive "Memory is not available" failures.
-        """
+    def test_run_job_exposes_only_built_in_memory_for_job_scoped_opt_in(self, tmp_path):
+        """A persisted memory toolset exposes the built-in store without providers."""
         job = {
             "id": "memory-toolset-job",
             "name": "test",
@@ -648,7 +642,7 @@ class TestRunJobSessionPersistence:
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["skip_memory"] is True
         assert kwargs["enabled_toolsets"] == ["memory", "file"]
-        assert "memory" in kwargs["disabled_toolsets"]
+        assert "memory" not in kwargs["disabled_toolsets"]
 
     def test_tick_skips_due_jobs_while_dispatch_is_paused(self, tmp_path):
         """The drain gate runs before advancing a due job's schedule."""
