@@ -1370,6 +1370,22 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
         if err and (data.get("success") is False or "error" in data):
             return True, f" [{_trim_error(str(err))}]"
 
+        # web_extract nests one result per URL.  A successful extraction keeps
+        # ``error: null`` for schema stability; the generic string heuristic
+        # below must not mistake that key for a failure.
+        if tool_name == "web_extract" and isinstance(data.get("results"), list):
+            nested_error = next(
+                (
+                    item.get("error")
+                    for item in data["results"]
+                    if isinstance(item, dict) and item.get("error")
+                ),
+                None,
+            )
+            if nested_error:
+                return True, f" [{_trim_error(str(nested_error))}]"
+            return False, ""
+
     # Generic heuristic for non-terminal tools
     # Multimodal tool results (dicts with _multimodal=True) are not strings —
     # treat them as successes since failures would be JSON-encoded strings.
