@@ -96,6 +96,30 @@ class TestDetectToolFailureStructured:
         result = json.dumps({"success": True, "data": "hello"})
         assert _detect_tool_failure("web_search", result) == (False, "")
 
+    def test_web_extract_null_nested_error_not_flagged(self):
+        result = json.dumps({
+            "results": [{
+                "url": "https://api.github.com/repos/example/commits",
+                "title": None,
+                "content": "```json\n[]\n```",
+                "error": None,
+            }]
+        })
+        assert _detect_tool_failure("web_extract", result) == (False, "")
+
+    def test_web_extract_nested_error_is_flagged(self):
+        result = json.dumps({
+            "results": [{
+                "url": "https://example.invalid",
+                "title": None,
+                "content": "",
+                "error": "connection failed",
+            }]
+        })
+        assert _detect_tool_failure("web_extract", result) == (
+            True,
+            " [connection failed]",
+        )
 
 
 class TestGetCuteToolMessageFailureSuffix:
