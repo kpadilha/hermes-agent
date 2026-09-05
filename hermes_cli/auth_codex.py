@@ -156,10 +156,9 @@ def _sync_codex_pool_entries(
     """Mirror a fresh Codex re-auth into the credential_pool OAuth entries.
 
     ``device_code`` (the singleton-seeded entry from ``hermes setup`` / the model picker) is always
-    synced. ``manual:device_code`` (``hermes auth add openai-codex``) is synced only when its
-    access_token equals the PREVIOUS singleton token — a legacy alias of the singleton; an entry
-    with its own token material is an independent account and must be left alone. ``manual:api_key``
-    and any other source are independent credentials and are never overwritten by a re-auth.
+    synced. ``manual:device_code`` aliases follow the native account-and-subject identity; exact
+    previous-token matches preserve legacy aliases unless both tokens prove different principals.
+    Independent accounts and ``manual:api_key`` entries are never overwritten by a re-auth.
 
     See #33000, #39236.
     The original #33538 fix refreshed every ``manual:device_code`` entry unconditionally. That worked when
@@ -175,12 +174,19 @@ def _sync_codex_pool_entries(
     entries = _pool_entries(auth_store, "openai-codex")
     if entries is None:
         return
-    # None/empty prev_at → no manual entry can be an alias (right default for a first-ever save).
+    from agent.credential_pool import _codex_principal_identity
+
     prev_at = (previous_singleton_tokens or {}).get("access_token") or None
+    principal = _codex_principal_identity(access_token)
     for entry in _codex_pool_dicts(entries):
         source = entry.get("source")
-        is_alias = source == "manual:device_code" and bool(
-            prev_at and entry.get("access_token") == prev_at)
+        entry_token = entry.get("access_token")
+        entry_principal = _codex_principal_identity(entry_token)
+        legacy_match = prev_at and entry_token == prev_at
+        proven_mismatch = principal is not None and entry_principal is not None and entry_principal != principal
+        is_alias = source == "manual:device_code" and (
+            (principal is not None and entry_principal == principal)
+            or (legacy_match and not proven_mismatch))
         if not (source == "device_code" or is_alias):
             continue
         entry["access_token"] = access_token
