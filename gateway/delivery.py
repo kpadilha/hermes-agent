@@ -20,8 +20,7 @@ logger = logging.getLogger(__name__)
 # Cap before gateway-level truncation of cron output for non-chunking platform delivery. Telegram's hard
 # API limit is 4096; the headroom covers the "full output saved to …" footer. Adapters that split long
 # messages natively (splits_long_messages) bypass this entirely.
-MAX_PLATFORM_OUTPUT = 24000
-TRUNCATED_VISIBLE = 23600
+MAX_PLATFORM_OUTPUT = 4000
 # Matches strings that are *only* a "silence" narration with optional markdown wrappers (*(silent)*,
 # _silent_, 🔇, a bare ".", "…"). Anchored so messages that merely *contain* "silent" never match.
 _SILENCE_NARRATION = re.compile(
