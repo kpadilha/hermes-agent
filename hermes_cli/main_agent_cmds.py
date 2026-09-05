@@ -5,6 +5,16 @@ are imported lazily inside the functions that use them (avoids an import cycle).
 """
 
 import sys
+from importlib import import_module
+
+
+_LOCAL_MEMORY_COMMANDS = {
+    "eval": ("hermes_cli.local_memory_ops.eval_cmd", "memory_eval_command"),
+    "reconcile": ("hermes_cli.local_memory_ops.reconcile_cmd", "memory_reconcile_command"),
+    "graph": ("hermes_cli.local_memory_ops.graph_cmd", "memory_graph_command"),
+    "ledger": ("hermes_cli.local_memory_ops.ledger_cmd", "memory_ledger_command"),
+    "snapshot": ("hermes_cli.local_memory_ops.snapshot_cmd", "memory_snapshot_command"),
+}
 
 
 def _cmd_memory_off():
@@ -62,6 +72,9 @@ def cmd_memory(args):
         _cmd_memory_off()
     elif sub == "reset":
         _cmd_memory_reset(args)
+    elif sub in _LOCAL_MEMORY_COMMANDS:
+        module_name, handler_name = _LOCAL_MEMORY_COMMANDS[sub]
+        getattr(import_module(module_name), handler_name)(args)
     else:
         from hermes_cli.memory_setup import memory_command
         memory_command(args)
