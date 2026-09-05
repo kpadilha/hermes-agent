@@ -101,16 +101,22 @@ def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
     return {"tokens": tokens, "last_refresh": state.get("last_refresh")}
 
 
+def _codex_account_id(access_token: Any) -> Optional[str]:
+    claims = _decode_jwt_claims(access_token)
+    auth_claims = claims.get("https://api.openai.com/auth") if isinstance(claims, dict) else None
+    value = auth_claims.get("chatgpt_account_id") if isinstance(auth_claims, dict) else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _sync_codex_pool_entries(
     auth_store: Dict[str, Any], tokens: Dict[str, str], last_refresh: Optional[str],
     previous_singleton_tokens: Optional[Dict[str, str]] = None) -> None:
     """Mirror a fresh Codex re-auth into the credential_pool OAuth entries.
 
     ``device_code`` (the singleton-seeded entry from ``hermes setup`` / the model picker) is always
-    synced. ``manual:device_code`` (``hermes auth add openai-codex``) is synced only when its
-    access_token equals the PREVIOUS singleton token — a legacy alias of the singleton; an entry
-    with its own token material is an independent account and must be left alone. ``manual:api_key``
-    and any other source are independent credentials and are never overwritten by a re-auth.
+    synced. ``manual:device_code`` aliases are matched by stable ChatGPT account id, with previous-token
+    equality retained for legacy/non-JWT stores. Independent accounts and ``manual:api_key`` entries are
+    never overwritten by a re-auth.
 
     See #33000, #39236.
     The original #33538 fix refreshed every ``manual:device_code`` entry unconditionally. That worked when
@@ -128,10 +134,14 @@ def _sync_codex_pool_entries(
         return
     # None/empty prev_at → no manual entry can be an alias (right default for a first-ever save).
     prev_at = (previous_singleton_tokens or {}).get("access_token") or None
+    account_id = _codex_account_id(access_token)
     for entry in _codex_pool_dicts(entries):
         source = entry.get("source")
+        entry_token = entry.get("access_token")
         is_alias = source == "manual:device_code" and bool(
-            prev_at and entry.get("access_token") == prev_at)
+            (prev_at and entry_token == prev_at)
+            or (account_id and _codex_account_id(entry_token) == account_id)
+        )
         if not (source == "device_code" or is_alias):
             continue
         entry["access_token"] = access_token
