@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import sqlite3
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
@@ -32,21 +33,85 @@ HANDOFF_ADOPTION_GRACE_SECONDS = 30.0
 LIVE_OWNER_STALE_CLAIM_FLOOR_SECONDS = 7200.0
 _TERMINAL_STATES = ("completed", "failed", "unknown")
 _lock = threading.RLock()
+_db_init_lock = threading.Lock()
+_initialized_files: Dict[Path, tuple[int, int, int]] = {}
+_write_state = threading.local()
 _PROCESS_ID = uuid.uuid4().hex
+_WRITE_RETRY_SECONDS = 15.0
+_READ_OPEN_RETRY_SECONDS = 30.0
+_WRITE_RETRY_MIN_SECONDS = 0.01
+_WRITE_RETRY_MAX_SECONDS = 0.25
+_DELETE_WRITE_YIELD_SECONDS = 0.02
+_REQUIRED_COLUMNS = frozenset({
+    "id", "job_id", "source", "process_id", "pid", "process_started_at", "status",
+    "handoff_pending", "handoff_started_at", "claimed_at", "started_at", "finished_at",
+    "error", "delivery_outcome", "scheduled_instant",
+})
+_REQUIRED_INDEXES = frozenset({
+    "idx_executions_job_claimed",
+    "idx_executions_status_claimed",
+    "idx_executions_occurrence",
+})
 
 
 # --- executions ledger --------------------------------------------------------------------------
+
+def _db_path() -> Path:
+    return Path(EXECUTIONS_FILE or (get_hermes_home().resolve() / "cron" / "executions.db"))
+
+
+def _connection_fingerprint(
+    path: Path, conn: sqlite3.Connection
+) -> tuple[int, int, int]:
+    stat = path.stat()
+    schema_version = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+    return stat.st_dev, stat.st_ino, schema_version
+
+
+def _open_ledger_db(
+    path: Path,
+    initialized_files: Dict[Path, tuple[int, int, int]],
+    init_lock: threading.Lock,
+    initialize: Callable[[sqlite3.Connection], None],
+    schema_is_current: Callable[[sqlite3.Connection], bool],
+) -> sqlite3.Connection:
+    from hermes_cli.sqlite_util import open_db
+    from hermes_state_wal import apply_wal_with_fallback
+
+    conn: Optional[sqlite3.Connection] = open_db(
+        path,
+        db_label="cron/executions.db",
+        busy_timeout_ms=50,
+        wal=False,
+        wal_companions=True,
+        synchronous_full=True,
+    )
+    try:
+        with init_lock:
+            fingerprint = _connection_fingerprint(path, conn)
+            if initialized_files.get(path) != fingerprint:
+                apply_wal_with_fallback(conn, db_label="cron/executions.db")
+                if not schema_is_current(conn):
+                    initialize(conn)
+                initialized_files[path] = _connection_fingerprint(path, conn)
+        opened, conn = conn, None
+        return opened
+    finally:
+        if conn is not None:
+            conn.close()
+
 
 def _connect() -> sqlite3.Connection:
     # Late imports: a scheduler daemon that outlives an on-disk upgrade already has the OLD
     # ``hermes_cli.sqlite_util`` / ``cron.jobs`` cached, so new names must be resolved at call time,
     # not at import time (the guarantee cron/ledger.py used to carry, see e24c8499).
     from cron.jobs import _ensure_cron_dir
-    from hermes_cli.sqlite_util import open_db
 
-    path = EXECUTIONS_FILE or (get_hermes_home().resolve() / "cron" / "executions.db")
+    path = _db_path()
     _ensure_cron_dir(path.parent)
-    return open_db(path, db_label="cron/executions.db", synchronous_full=True, initialize=_initialize_schema)
+    return _open_ledger_db(
+        path, _initialized_files, _db_init_lock, _initialize_schema, _schema_is_current
+    )
 
 
 def _initialize_schema(conn: sqlite3.Connection) -> None:
@@ -93,11 +158,149 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _schema_is_current(conn: sqlite3.Connection) -> bool:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(executions)")}
+    indexes = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='executions'"
+        )
+    }
+    return _REQUIRED_COLUMNS <= columns and _REQUIRED_INDEXES <= indexes
+
+
 @contextmanager
 def _transaction() -> Iterator[sqlite3.Connection]:
     from hermes_cli.sqlite_util import transaction
 
-    with _lock, transaction(_connect()) as conn:
+    conn = _open_with_retry(_connect, timeout=_READ_OPEN_RETRY_SECONDS)
+    with _lock, transaction(conn) as conn:
+        yield conn
+
+
+def _is_busy(exc: sqlite3.OperationalError) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    return str(exc).strip().lower() in {
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+    }
+
+
+def _retry_delay(attempt: int) -> float:
+    ceiling = min(_WRITE_RETRY_MAX_SECONDS, _WRITE_RETRY_MIN_SECONDS * (2**attempt))
+    return random.uniform(_WRITE_RETRY_MIN_SECONDS, ceiling)
+
+
+def _open_with_retry(
+    connect: Callable[[], sqlite3.Connection], *, timeout: float = _WRITE_RETRY_SECONDS
+) -> sqlite3.Connection:
+    deadline = time.monotonic() + timeout
+    attempt = 0
+    while True:
+        try:
+            return connect()
+        except sqlite3.OperationalError as exc:
+            if not _is_busy(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(_retry_delay(attempt))
+            attempt += 1
+
+
+@contextmanager
+def _serialized_write(
+    connect: Callable[[], sqlite3.Connection], lock: threading.RLock, db_path: Path
+) -> Iterator[sqlite3.Connection]:
+    """Acquire SQLite's write reservation before blocking this process's readers.
+
+    ``BEGIN IMMEDIATE`` puts contention at the only safe retry boundary: the body has not run yet.
+    SQLite remains the cross-process arbiter; jitter prevents synchronized workers from repeatedly
+    colliding after the busy timeout. Reentrant writes use a savepoint on the owning connection.
+    """
+    nested_conn = getattr(_write_state, "conn", None)
+    if nested_conn is not None:
+        if getattr(_write_state, "db_path", None) != db_path:
+            raise RuntimeError("nested cron ledger writes cannot switch profile databases")
+        depth = int(getattr(_write_state, "depth", 1)) + 1
+        savepoint = f"cron_nested_{depth}"
+        with lock:
+            nested_conn.execute(f"SAVEPOINT {savepoint}")
+            _write_state.depth = depth
+            try:
+                yield nested_conn
+            except BaseException:
+                with suppress(sqlite3.Error):
+                    nested_conn.execute(f"ROLLBACK TO {savepoint}")
+                with suppress(sqlite3.Error):
+                    nested_conn.execute(f"RELEASE {savepoint}")
+                raise
+            else:
+                nested_conn.execute(f"RELEASE {savepoint}")
+            finally:
+                _write_state.depth = depth - 1
+        return
+
+    deadline = time.monotonic() + _WRITE_RETRY_SECONDS
+    attempt = 0
+    conn: Optional[sqlite3.Connection] = None
+    delete_mode = False
+    while True:
+        try:
+            conn = connect()
+            mode = conn.execute("PRAGMA journal_mode").fetchone()
+            delete_mode = bool(mode and str(mode[0]).lower() == "delete")
+            conn.execute("BEGIN IMMEDIATE")
+            break
+        except sqlite3.OperationalError as exc:
+            if conn is not None:
+                conn.close()
+                conn = None
+            if not _is_busy(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(_retry_delay(attempt))
+            attempt += 1
+
+    assert conn is not None
+    _write_state.conn = conn
+    _write_state.db_path = db_path
+    _write_state.depth = 1
+    try:
+        with lock:
+            try:
+                yield conn
+            except BaseException:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    pass
+                raise
+            else:
+                commit_attempt = 0
+                while True:
+                    try:
+                        conn.execute("COMMIT")
+                        break
+                    except sqlite3.OperationalError as exc:
+                        if not _is_busy(exc) or time.monotonic() >= deadline:
+                            raise
+                        time.sleep(_retry_delay(commit_attempt))
+                        commit_attempt += 1
+    finally:
+        _write_state.conn = None
+        _write_state.db_path = None
+        _write_state.depth = 0
+        conn.close()
+        if delete_mode:
+            # ponytail: DELETE has no fair writer queue; yield with no connection open so a
+            # hot worker cannot reacquire forever. Remove when the SQLite fallback does.
+            time.sleep(_DELETE_WRITE_YIELD_SECONDS)
+
+
+@contextmanager
+def _write_transaction() -> Iterator[sqlite3.Connection]:
+    with _serialized_write(_connect, _lock, _db_path()) as conn:
         yield conn
 
 
@@ -190,7 +393,7 @@ def create_execution(
     now = _hermes_now().isoformat()
     execution_id = uuid.uuid4().hex
     pid = os.getpid()
-    with _transaction() as conn:
+    with _write_transaction() as conn:
         conn.execute(
             """INSERT INTO executions
                (id, job_id, source, process_id, pid, process_started_at,
@@ -208,7 +411,7 @@ def set_execution_occurrence(execution_id: str, instant: Optional[str]) -> None:
     """Bind the store-claimed snapshot before a provider hands it to a worker."""
     from cron.occurrences import scheduled_instant
 
-    with _transaction() as conn:
+    with _write_transaction() as conn:
         cur = conn.execute(
             "UPDATE executions SET scheduled_instant=? WHERE id=? AND status='claimed' "
             "AND handoff_pending=0 AND process_id=? AND pid=?",
@@ -220,7 +423,7 @@ def set_execution_occurrence(execution_id: str, instant: Optional[str]) -> None:
 
 def mark_execution_handoff_pending(execution_id: str) -> Optional[Dict[str, Any]]:
     """Fence restart recovery while an external worker is adopting a claim."""
-    with _transaction() as conn:
+    with _write_transaction() as conn:
         cur = conn.execute(
             """UPDATE executions
                SET handoff_pending=1, handoff_started_at=?
@@ -245,7 +448,7 @@ def adopt_claimed_execution(execution_id: str) -> Optional[Dict[str, Any]]:
     pid = os.getpid()
     process_started_at = _process_start_time(pid)
     now = _hermes_now().isoformat()
-    with _transaction() as conn:
+    with _write_transaction() as conn:
         cur = conn.execute(
             """UPDATE executions
                SET process_id=?, pid=?, process_started_at=?,
@@ -264,7 +467,7 @@ def adopt_claimed_execution(execution_id: str) -> Optional[Dict[str, Any]]:
 def mark_execution_running(execution_id: str) -> Optional[Dict[str, Any]]:
     """Transition one claimed attempt to running exactly once."""
     now = _hermes_now().isoformat()
-    with _transaction() as conn:
+    with _write_transaction() as conn:
         cur = conn.execute(
             """UPDATE executions
                SET status='running', started_at=?, handoff_pending=0,
@@ -288,7 +491,7 @@ def finish_execution(
     now = _hermes_now().isoformat()
     status = "completed" if success else "failed"
     detail = None if success else (str(error) if error else "unknown failure")
-    with _transaction() as conn:
+    with _write_transaction() as conn:
         cur = conn.execute(
             """UPDATE executions
                SET status=?, finished_at=?, error=?, handoff_pending=0,
@@ -327,7 +530,7 @@ def recover_interrupted_executions() -> int:
     # tick must stay config-free (tests/cron/test_idle_tick_config_skip.py).
     stale_after: Optional[float] = None
     stale_after_resolved = False
-    with _transaction() as conn:
+    with _write_transaction() as conn:
         rows = conn.execute(
             """SELECT id, status, process_id, pid, process_started_at,
                       handoff_pending, handoff_started_at, claimed_at

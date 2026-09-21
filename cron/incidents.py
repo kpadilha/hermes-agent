@@ -43,6 +43,13 @@ MAX_ERROR_CHARS = 500
 _MAX_SIGNATURE_ERROR_CHARS = 200
 
 _lock = threading.RLock()
+_db_init_lock = threading.Lock()
+_initialized_files: Dict[Path, tuple[int, int, int]] = {}
+_REQUIRED_COLUMNS = frozenset({
+    "id", "job_id", "error_sig", "state", "failure_type", "first_seen_at",
+    "last_seen_at", "acked_at", "alerted_at", "closed_at", "error", "output_file",
+})
+_REQUIRED_INDEXES = frozenset({"idx_cron_incidents_job", "idx_cron_incidents_state"})
 
 
 def _db_path() -> Path:
@@ -60,11 +67,12 @@ def _connect() -> sqlite3.Connection:
     # ``hermes_cli.sqlite_util`` / ``cron.jobs`` cached, so new names must be resolved at call time,
     # not at import time (the guarantee cron/ledger.py used to carry, see e24c8499).
     from cron.jobs import _ensure_cron_dir
-    from hermes_cli.sqlite_util import open_db
 
     path = _db_path()
     _ensure_cron_dir(path.parent)
-    return open_db(path, db_label="cron/executions.db", synchronous_full=True, initialize=_initialize_schema)
+    return _executions._open_ledger_db(
+        path, _initialized_files, _db_init_lock, _initialize_schema, _schema_is_current
+    )
 
 
 def _initialize_schema(conn: sqlite3.Connection) -> None:
@@ -98,11 +106,31 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _schema_is_current(conn: sqlite3.Connection) -> bool:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(cron_incidents)")}
+    indexes = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='cron_incidents'"
+        )
+    }
+    return _REQUIRED_COLUMNS <= columns and _REQUIRED_INDEXES <= indexes
+
+
 @contextmanager
 def _transaction() -> Iterator[sqlite3.Connection]:
     from hermes_cli.sqlite_util import transaction
 
-    with _lock, transaction(_connect()) as conn:
+    conn = _executions._open_with_retry(
+        _connect, timeout=_executions._READ_OPEN_RETRY_SECONDS
+    )
+    with _lock, transaction(conn) as conn:
+        yield conn
+
+
+@contextmanager
+def _write_transaction() -> Iterator[sqlite3.Connection]:
+    with _executions._serialized_write(_connect, _lock, _db_path()) as conn:
         yield conn
 
 
@@ -165,7 +193,7 @@ def upsert_incident(
     failure_type = failure_type or _classify_failure_type(error)
     output_file = str(output_file) if output_file is not None else None
 
-    with _transaction() as conn:
+    with _write_transaction() as conn:
         row = conn.execute(
             "SELECT id, state FROM cron_incidents WHERE id=?", (incident_id,)
         ).fetchone()
@@ -200,7 +228,7 @@ def set_incident_state(incident_id: str, state: str) -> bool:
     if state not in INCIDENT_STATES:
         return False
     now = _hermes_now().isoformat()
-    with _transaction() as conn:
+    with _write_transaction() as conn:
         row = conn.execute(
             "SELECT state FROM cron_incidents WHERE id=?", (incident_id,)
         ).fetchone()
@@ -243,7 +271,7 @@ def close_incidents_for_recovered_job(job_id: str) -> int:
     same error re-opens a resolved incident and alerts again (see ``upsert_incident``), whereas
     ``closed`` keeps that signature silent."""
     now = _hermes_now().isoformat()
-    with _transaction() as conn:
+    with _write_transaction() as conn:
         cursor = conn.execute(
             """UPDATE cron_incidents SET state='resolved', closed_at=?
                WHERE job_id=? AND state IN ('detected', 'alerted')""",
