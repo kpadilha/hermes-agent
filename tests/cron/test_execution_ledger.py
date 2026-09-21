@@ -7,7 +7,11 @@ import os
 import sqlite3
 import subprocess
 import sys
+import textwrap
+import threading
+import time
 from pathlib import Path
+from typing import cast
 
 
 def _point_ledger(monkeypatch, tmp_path):
@@ -47,6 +51,166 @@ def test_execution_can_be_loaded_by_exact_attempt_id(monkeypatch, tmp_path):
     assert executions.get_execution(first["id"]) == first
     assert executions.get_execution(second["id"]) == second
     assert executions.get_execution("missing") is None
+
+
+def test_current_schema_skips_first_touch_ddl(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    record = executions.create_execution("existing", source="builtin")
+    executions._initialized_files.clear()
+
+    def unexpected_initialize(_conn):
+        raise AssertionError("current schema must not run DDL on first process touch")
+
+    monkeypatch.setattr(executions, "_initialize_schema", unexpected_initialize)
+    assert executions.get_execution(record["id"]) == record
+
+
+def test_execution_writes_retry_sqlite_contention_without_blocking_reads(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    baseline = executions.create_execution("baseline", source="builtin")
+    db_path = str(executions.EXECUTIONS_FILE)
+    ready = tmp_path / "holder-ready"
+    release = tmp_path / "holder-release"
+    blocked = threading.Event()
+    done = threading.Event()
+    errors = []
+
+    holder_code = textwrap.dedent(
+        f"""
+        import pathlib, sqlite3, time
+        conn = sqlite3.connect({db_path!r})
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('BEGIN IMMEDIATE')
+        pathlib.Path({str(ready)!r}).write_text('1')
+        for _ in range(500):
+            if pathlib.Path({str(release)!r}).exists():
+                break
+            time.sleep(0.01)
+        conn.rollback()
+        conn.close()
+        """
+    )
+    from cron import incidents
+
+    real_connect = executions._connect
+
+    def observed_connect():
+        blocked.set()
+        return real_connect()
+
+    def write_execution():
+        try:
+            executions.create_execution("cross-process", source="builtin")
+            incidents.upsert_incident("cross-process", "boom")
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    monkeypatch.setattr(executions, "_connect", observed_connect)
+    holder = subprocess.Popen([sys.executable, "-c", holder_code])
+    writer = threading.Thread(target=write_execution)
+    try:
+        for _ in range(1000):
+            if ready.exists():
+                break
+            time.sleep(0.01)
+        assert ready.exists(), "holder never acquired SQLite's write lock"
+
+        writer.start()
+        assert blocked.wait(10), "writer never entered its contended connection"
+        assert not done.is_set(), "writer bypassed SQLite's write lock"
+
+        before = time.monotonic()
+        assert executions.get_execution(baseline["id"]) == baseline
+        assert time.monotonic() - before < 2.0
+    finally:
+        release.write_text("1")
+        holder.wait(timeout=15)
+        writer.join(timeout=15)
+
+    assert done.is_set(), "writer did not proceed after SQLite lock release"
+    assert errors == []
+    assert executions.latest_execution("cross-process") is not None
+    assert any(row["job_id"] == "cross-process" for row in incidents.list_incidents())
+
+    # Replacing the ledger under a live process invalidates the inode-keyed schema caches.
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        Path(db_path + suffix).unlink(missing_ok=True)
+    recreated = executions.create_execution("after-replace", source="builtin")
+    incidents.upsert_incident("after-replace", "boom")
+    assert executions.get_execution(recreated["id"]) is not None
+    assert any(row["job_id"] == "after-replace" for row in incidents.list_incidents())
+
+
+def test_delete_write_yields_after_closing_connection(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    events = []
+
+    class DeleteConnection:
+        def execute(self, sql):
+            if sql == "PRAGMA journal_mode":
+                return self
+            assert sql in {"BEGIN IMMEDIATE", "COMMIT"}
+            return None
+
+        def fetchone(self):
+            return ("delete",)
+
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setattr(executions.time, "sleep", lambda seconds: events.append(("sleep", seconds)))
+    with executions._serialized_write(
+        lambda: cast(sqlite3.Connection, DeleteConnection()),
+        threading.RLock(),
+        tmp_path / "executions.db",
+    ):
+        pass
+
+    assert events == ["close", ("sleep", executions._DELETE_WRITE_YIELD_SECONDS)]
+
+
+def test_write_retry_budget_is_shared_with_commit(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    clock = [0.0]
+
+    class ContendedCommit:
+        commit_calls = 0
+        closed = False
+
+        def execute(self, sql):
+            if sql == "PRAGMA journal_mode":
+                return self
+            if sql == "BEGIN IMMEDIATE":
+                clock[0] += 10.0
+                return None
+            if sql == "COMMIT":
+                self.commit_calls += 1
+                clock[0] += 6.0
+                raise sqlite3.OperationalError("database is locked")
+            if sql == "ROLLBACK":
+                return None
+            raise AssertionError(sql)
+
+        def fetchone(self):
+            return ("wal",)
+
+        def close(self):
+            self.closed = True
+
+    conn = ContendedCommit()
+    monkeypatch.setattr(executions.time, "monotonic", lambda: clock[0])
+    with __import__("pytest").raises(sqlite3.OperationalError):
+        with executions._serialized_write(
+            lambda: cast(sqlite3.Connection, conn),
+            threading.RLock(),
+            tmp_path / "executions.db",
+        ):
+            pass
+
+    assert conn.commit_calls == 1
+    assert conn.closed is True
 
 
 def test_fresh_external_handoff_is_not_recovered_before_worker_adopts(
