@@ -18,7 +18,7 @@ def test_update_runtime_status_publishes_active_agent_sessions(monkeypatch):
     def fake_write_runtime_status(**kwargs):
         calls.append(kwargs)
 
-    monkeypatch.setattr("gateway.status.write_runtime_status", fake_write_runtime_status)
+    monkeypatch.setattr(gateway_run, "_write_runtime_status_quiet", fake_write_runtime_status)
     runner = _runner()
     runner._running_agents["discord:chat:thread:user"] = object()
 
@@ -37,7 +37,7 @@ def test_release_running_agent_state_updates_runtime_status(monkeypatch):
     def fake_write_runtime_status(**kwargs):
         calls.append(kwargs)
 
-    monkeypatch.setattr("gateway.status.write_runtime_status", fake_write_runtime_status)
+    monkeypatch.setattr(gateway_run, "_write_runtime_status_quiet", fake_write_runtime_status)
     runner = _runner()
     runner._running_agents["telegram:chat:user"] = object()
     runner._running_agents_ts["telegram:chat:user"] = 123.0
