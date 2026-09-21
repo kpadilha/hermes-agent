@@ -21,6 +21,7 @@ def open_db(
     db_label: str,
     busy_timeout_ms: int = 5000,
     wal: bool = True,
+    wal_companions: bool = False,
     foreign_keys: bool = False,
     synchronous_full: bool = False,
     row_factory=sqlite3.Row,
@@ -34,10 +35,12 @@ def open_db(
     explicit PRAGMA so it is observable. ``wal=True`` goes through ``apply_wal_with_fallback`` — the
     only journal-mode setter that carries the WAL-reset-bug gate, the network-FS silent-refusal
     fallback and the never-live-downgrade invariant; a raw ``PRAGMA journal_mode=WAL`` bypasses all
-    three. Only the transient ``database is locked`` from that pragma is retried (``wal_lock_retries``):
+    three. ``wal_companions=True`` reapplies only the per-connection WAL size/durability settings
+    after another connection has already established journal mode. Only the transient
+    ``database is locked`` from the journal-mode pragma is retried (``wal_lock_retries``):
     a first opener initializing a shared DB can make it ignore the busy timeout, notably on Windows.
     """
-    from hermes_state_wal import apply_wal_with_fallback
+    from hermes_state_wal import apply_wal_companions, apply_wal_with_fallback
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,6 +58,8 @@ def open_db(
                     if str(exc).lower() != "database is locked" or attempt + 1 == wal_lock_retries:
                         raise
                     time.sleep(0.01 * (2**attempt))
+        elif wal_companions:
+            apply_wal_companions(conn)
         if foreign_keys:
             conn.execute("PRAGMA foreign_keys=ON")
         if synchronous_full:
