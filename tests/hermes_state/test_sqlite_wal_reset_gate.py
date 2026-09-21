@@ -65,6 +65,27 @@ class TestApplyWalWalResetGate:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
         conn.close()
 
+    def test_existing_delete_does_not_request_redundant_mode_switch(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            hermes_state_wal, "is_sqlite_wal_reset_vulnerable", lambda version_info=None: True
+        )
+        conn = sqlite3.connect(str(tmp_path / "existing-delete.db"))
+        conn.execute("CREATE TABLE t (x INTEGER)")
+        conn.commit()
+        monkeypatch.setattr(
+            hermes_state_wal,
+            "_set_journal_mode_no_wait",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("DELETE mode must not be set when already active")
+            ),
+        )
+        try:
+            assert apply_wal_with_fallback(conn, db_label="existing-delete.db") == "delete"
+        finally:
+            conn.close()
+
     def test_existing_wal_left_alone_when_vulnerable(
         self, tmp_path, monkeypatch, caplog
     ):
@@ -277,9 +298,10 @@ class TestNoDowngradeUnderConcurrentOpeners:
             str(tmp_path / "race.db"), factory=_FlipLockedConnection
         )
         try:
+            assert conn.execute("PRAGMA journal_mode=TRUNCATE").fetchone()[0] == "truncate"
             with caplog.at_level("WARNING", logger="hermes_state"):
                 mode = apply_wal_with_fallback(conn, db_label="race.db")
-            assert mode == "delete"  # observed pre-flip mode, not a forced flip
+            assert mode == "truncate"  # observed pre-flip mode, not a forced flip
             assert any(
                 "concurrent openers" in r.getMessage() for r in caplog.records
             )
