@@ -9,6 +9,7 @@ arbitrary toolsets.
 from types import SimpleNamespace
 
 from tools.delegate_tool import _strip_blocked_tools, _emit_parent_console
+from tools.delegate_tool_toolsets import _resolve_child_toolsets
 
 class TestToolsetIntersection:
     """Subagent toolsets must be a subset of parent's enabled_toolsets."""
@@ -20,6 +21,48 @@ class TestToolsetIntersection:
         assert "clarify" not in child
         assert "memory" not in child
         assert "terminal" in child
+
+
+
+    def test_inherited_toolsets_drop_mcp_when_opted_out(self, monkeypatch):
+        """The opt-out applies when the child inherits the parent's whole surface."""
+        parent = SimpleNamespace(
+            enabled_toolsets=["terminal", "web", "mcp-beehiiv"],
+            disabled_toolsets=[],
+        )
+        monkeypatch.setattr(
+            "tools.delegate_tool_toolsets._get_inherit_mcp_toolsets", lambda: False
+        )
+
+        enabled, _ = _resolve_child_toolsets(parent, None, "leaf")
+
+        assert "mcp-beehiiv" not in enabled
+        assert "terminal" in enabled
+        assert "web" in enabled
+
+    def test_all_tools_parent_drops_derived_mcp_when_opted_out(self, monkeypatch):
+        """enabled_toolsets=None derives toolsets from loaded names; MCP still must be removed."""
+        parent = SimpleNamespace(
+            enabled_toolsets=None,
+            disabled_toolsets=[],
+            valid_tool_names={"terminal", "web_search", "mcp__beehiiv__list_posts"},
+        )
+        mapping = {
+            "terminal": "terminal",
+            "web_search": "web",
+            "mcp__beehiiv__list_posts": "mcp-beehiiv",
+        }
+        monkeypatch.setattr("model_tools.get_toolset_for_tool", mapping.get)
+        monkeypatch.setattr(
+            "tools.delegate_tool_toolsets._get_inherit_mcp_toolsets", lambda: False
+        )
+
+        enabled, _ = _resolve_child_toolsets(parent, None, "leaf")
+
+        assert "mcp-beehiiv" not in enabled
+        assert "terminal" in enabled
+        assert "web" in enabled
+
 
 class TestEmitParentConsole:
     """Progress lines (e.g. ``✓ [N/M] …``) must route through the parent's
