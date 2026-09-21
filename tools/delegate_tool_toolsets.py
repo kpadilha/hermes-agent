@@ -107,6 +107,11 @@ def _resolve_child_toolsets(
         child_toolsets = parent_enabled
     else:
         child_toolsets = sorted(parent_toolsets) or DEFAULT_TOOLSETS
+    # `inherit_mcp_toolsets` must govern every implicit-inheritance path, not
+    # only the explicit-narrowing branch above. Otherwise an all-tools parent
+    # silently re-adds MCP schemas that some child providers cannot parse.
+    if not toolsets and not _get_inherit_mcp_toolsets():
+        child_toolsets = [t for t in child_toolsets if not _is_mcp_toolset_name(t)]
     child_toolsets = _strip_blocked_tools(child_toolsets)
 
     raw_parent_disabled = getattr(parent_agent, "disabled_toolsets", None)
