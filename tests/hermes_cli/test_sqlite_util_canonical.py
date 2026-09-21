@@ -38,6 +38,14 @@ def test_transaction_closes_the_connection_even_when_the_body_raises(tmp_path):
     with pytest.raises(sqlite3.ProgrammingError):
         conn.execute("SELECT 1")
 
+    conn = sqlite_util.open_db(
+        db, db_label="t.db", wal=False, wal_companions=True
+    )
+    try:
+        assert conn.execute("PRAGMA journal_size_limit").fetchone()[0] > 0
+    finally:
+        conn.close()
+
 
 def test_open_db_closes_the_half_open_connection_when_initialize_raises(monkeypatch, tmp_path):
     opened = []
