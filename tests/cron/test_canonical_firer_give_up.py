@@ -10,7 +10,8 @@ def test_given_up_fire_leaves_its_attempt_recoverable_not_running(tmp_path, monk
     """CronExecutionUnknown pauses the job, but the firer's own ``running`` row must not stay in
     flight until a restart: receipt recovery skips a same-process running row, so the owner's
     later terminal receipt could never settle it (R17 residual)."""
-    with jobs.use_cron_store(tmp_path / 'cron'):
+    monkeypatch.setattr(executions, 'EXECUTIONS_FILE', tmp_path / 'cron' / 'executions.db')
+    with jobs.use_cron_store(tmp_path):
         job = jobs.create_job(prompt='report', schedule='every 1h', deliver='local')
         fire = executions.create_execution(job['id'], source='test')['id']
         journal = scheduler_authority.journal_path(job['id'], fire)

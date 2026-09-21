@@ -129,7 +129,7 @@ def _enforce_macos_synchronous_full(conn: sqlite3.Connection) -> None:
     _darwin_pragma(conn, "PRAGMA synchronous=FULL")
 
 
-def _apply_wal_companions(conn: sqlite3.Connection) -> None:
+def apply_wal_companions(conn: sqlite3.Connection) -> None:
     """The settings every WAL activation carries: size limit + macOS barriers."""
     _apply_wal_size_limit(conn)
     _apply_macos_checkpoint_barrier(conn)
@@ -378,7 +378,7 @@ def apply_wal_with_fallback(conn: sqlite3.Connection, *, db_label: str = "state.
             if current_mode == "wal":
                 if is_sqlite_wal_reset_vulnerable():
                     return _apply_delete_for_wal_reset_bug(conn, db_label=db_label)
-                _apply_wal_companions(conn)
+                apply_wal_companions(conn)
                 return "wal"
             if current_mode == "delete" and not require_wal and _database_has_content(conn):
                 if is_sqlite_wal_reset_vulnerable():
@@ -401,7 +401,7 @@ def apply_wal_with_fallback(conn: sqlite3.Connection, *, db_label: str = "state.
             _log_configured_delete_overridden_once(db_label)
         _warn_existing_wal_on_cross_vm_fs(conn)
         _warn_existing_wal_on_network_fs(conn)
-        _apply_wal_companions(conn)
+        apply_wal_companions(conn)
         return "wal"
 
     if configured == "delete":
@@ -446,7 +446,7 @@ def _enable_wal(conn: sqlite3.Connection, db_label: str, require_wal: bool, curr
     def _wal_activated() -> str:
         if upgrading_existing_db:
             _log_journal_mode_upgrade_once(db_label, current_mode)
-        _apply_wal_companions(conn)
+        apply_wal_companions(conn)
         return "wal"
 
     try:
@@ -568,13 +568,16 @@ def _apply_delete_for_wal_reset_bug(conn: sqlite3.Connection, *, db_label: str, 
             _log_configured_delete_overridden_once(db_label)
         _warn_existing_wal_on_cross_vm_fs(conn)
         _warn_existing_wal_on_network_fs(conn)
-        _apply_wal_companions(conn)
+        apply_wal_companions(conn)
         return "wal"
     if current is None:
         if require_delete:
             raise sqlite3.OperationalError(_CANNOT_VERIFY_DELETE_MSG)
         _log_wal_reset_bug_once(db_label, kept_wal=True, indeterminate=True)
         return "wal"
+    if current == "delete":
+        _log_wal_reset_bug_once(db_label, kept_wal=False)
+        return "delete"
     actual = ""
     try:
         actual = _set_journal_mode_no_wait(conn, "DELETE")

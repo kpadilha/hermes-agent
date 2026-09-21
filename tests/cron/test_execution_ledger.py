@@ -7,7 +7,13 @@ import os
 import sqlite3
 import subprocess
 import sys
+import textwrap
+import threading
+import time
 from pathlib import Path
+from typing import cast
+
+import pytest
 
 
 def _point_ledger(monkeypatch, tmp_path):
@@ -15,6 +21,289 @@ def _point_ledger(monkeypatch, tmp_path):
 
     monkeypatch.setattr(executions, "EXECUTIONS_FILE", tmp_path / "cron" / "executions.db")
     return executions
+
+
+class _FaultConnection:
+    """Inject a failed SQLite operation before delegating to a disposable real database."""
+
+    def __init__(self, real, fault):
+        self.real = real
+        self.fault = fault
+        self.closed = False
+        self.successful = []
+
+    def execute(self, sql, params=()):
+        operation = sql.strip().split()[0].upper()
+        if self.fault(operation):
+            error = sqlite3.OperationalError("database is locked")
+            error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+            raise error
+        result = self.real.execute(sql, params)
+        self.successful.append(operation)
+        return result
+
+    @property
+    def in_transaction(self):
+        return self.real.in_transaction
+
+    def __enter__(self):
+        self.real.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self.real.__exit__(*args)
+
+    def close(self):
+        self.closed = True
+        self.real.close()
+
+
+def _retry_writer_case(executions, monkeypatch, writer):
+    monkeypatch.setattr(executions, "_process_start_time", lambda _pid: 123)
+    row = executions.create_execution("retry-job", source="builtin")
+    execution_id = row["id"]
+    calls = {
+        "progress": lambda: executions.touch_execution_progress(execution_id),
+        "missed": lambda: executions.record_missed_occurrences(
+            "retry-job", count=3, first_instant=None, detail="offline"),
+        "recovery": lambda: executions.recover_receipted_execution(
+            execution_id, "retry-job", success=True, delivery_outcome="delivered"),
+        "delivery": lambda: executions.settle_delivery_outcome(execution_id, "delivered"),
+        "dead_owner": lambda: executions.terminalize_dead_owner(execution_id, reason="exit 9"),
+        "give_up": lambda: executions.give_up_execution(execution_id, reason="unverified"),
+    }
+    if writer == "delivery":
+        executions.finish_execution(execution_id, success=True, delivery_outcome="queued")
+    if writer in {"recovery", "dead_owner"}:
+        monkeypatch.setattr(executions, "_PROCESS_ID", "replacement")
+        monkeypatch.setattr(executions, "_owner_is_live", lambda *_args: False)
+    return execution_id, calls[writer]
+
+
+@pytest.mark.parametrize("writer", ["progress", "missed", "recovery", "delivery", "dead_owner", "give_up"])
+@pytest.mark.parametrize("seam", ["BEGIN", "UPDATE", "COMMIT"])
+def test_all_ledger_writers_retry_without_replaying_effects(monkeypatch, tmp_path, writer, seam):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    _execution_id, write = _retry_writer_case(executions, monkeypatch, writer)
+    operation = "INSERT" if seam == "UPDATE" and writer == "missed" else seam
+    failures = []
+    connections = []
+    emissions = []
+    metrics = []
+    real_connect = executions._connect
+
+    def fault(op):
+        if op == operation and not failures:
+            failures.append(op)
+            return True
+        return False
+
+    def connect():
+        conn = _FaultConnection(real_connect(), fault)
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(executions, "_connect", connect)
+    monkeypatch.setattr(executions, "_emit_execution_state", lambda *a, **k: emissions.append(a))
+    monkeypatch.setattr(executions, "record_cron_finish", lambda *a: metrics.append(a))
+    assert write()
+    assert failures == [operation], "writer bypassed the protected transaction seam"
+    assert all(conn.closed for conn in connections)
+    assert sum(conn.successful.count(operation) for conn in connections) == 1
+    assert len(emissions) == (0 if writer in {"progress", "delivery"} else 1)
+    assert len(metrics) == (1 if writer == "recovery" else 0)
+    with sqlite3.connect(str(executions.EXECUTIONS_FILE)) as conn:
+        rows = conn.execute("SELECT status, delivery_outcome, progress_at FROM executions WHERE job_id='retry-job'").fetchall()
+    assert len(rows) == (2 if writer == "missed" else 1)
+    if writer == "progress":
+        assert rows[0][2]
+    elif writer == "delivery":
+        assert rows[0][:2] == ("completed", "delivered")
+        assert write() is False
+    elif writer == "recovery":
+        assert rows[0][:2] == ("completed", "delivered")
+        assert write() is None
+    elif writer in {"give_up", "dead_owner"}:
+        assert rows[0][0] == "unknown"
+        assert write() is False
+    else:
+        assert sorted(row[0] for row in rows) == ["claimed", "missed"]
+    assert getattr(executions._write_state, "conn", None) is None
+
+
+@pytest.mark.parametrize("seam", ["BEGIN", "UPDATE", "SELECT", "DELETE", "COMMIT"])
+@pytest.mark.parametrize("busy", [True, False])
+def test_ledger_retry_failures_roll_back_and_close(monkeypatch, tmp_path, seam, busy):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    execution_id, write = _retry_writer_case(executions, monkeypatch, "give_up")
+    before = executions.get_execution(execution_id)
+    clock = [0.0]
+    calls = []
+    connections = []
+    emitted = []
+    error = sqlite3.OperationalError("database is locked" if busy else "disk I/O error")
+    real_connect = executions._connect
+
+    def fault(op):
+        if op == seam:
+            calls.append(op)
+            clock[0] += 8.0
+            raise error
+        return False
+
+    def connect():
+        conn = _FaultConnection(real_connect(), fault)
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(executions, "_connect", connect)
+    monkeypatch.setattr(executions, "_emit_execution_state", lambda *a, **k: emitted.append(a))
+    monkeypatch.setattr(executions.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(executions.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    with pytest.raises(sqlite3.OperationalError) as caught:
+        write()
+    assert caught.value is error
+    assert len(calls) == (2 if busy else 1)
+    assert all(conn.closed for conn in connections)
+    assert emitted == []
+    assert executions._write_state.conn is None
+    assert getattr(executions._write_state, "deadline", None) is None
+    with sqlite3.connect(str(executions.EXECUTIONS_FILE)) as conn:
+        conn.row_factory = sqlite3.Row
+        assert dict(conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()) == before
+    monkeypatch.setattr(executions, "_connect", real_connect)
+    assert write() is True  # Failure has not leaked ownership or a partial terminal state.
+
+
+def test_statement_and_commit_share_acquisition_budget(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    execution_id, write = _retry_writer_case(executions, monkeypatch, "give_up")
+    clock = [0.0]
+    attempts = []
+    real_connect = executions._connect
+
+    def fault(op):
+        if op in {"BEGIN", "UPDATE", "COMMIT"}:
+            attempts.append(op)
+            if attempts.count(op) == 1:
+                clock[0] += 6.0
+                return True
+        return False
+
+    monkeypatch.setattr(executions, "_connect", lambda: _FaultConnection(real_connect(), fault))
+    monkeypatch.setattr(executions.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(executions.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        write()
+    assert attempts == ["BEGIN", "BEGIN", "UPDATE", "UPDATE", "COMMIT"]
+    monkeypatch.setattr(executions, "_connect", real_connect)
+    assert executions.get_execution(execution_id)["status"] == "claimed"
+
+
+def test_nested_ledger_writes_keep_savepoints_and_profile_isolation(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    execution_id, write = _retry_writer_case(executions, monkeypatch, "give_up")
+    with executions._write_transaction() as outer:
+        deadline = executions._write_state.deadline
+        with pytest.raises(ValueError, match="abort inner"):
+            with executions._write_transaction() as inner:
+                assert inner is outer
+                assert write() is True
+                assert executions._write_state.deadline == deadline
+                raise ValueError("abort inner")
+        assert executions._write_state.depth == 1
+        assert outer.execute("SELECT status FROM executions WHERE id=?", (execution_id,)).fetchone()[0] == "claimed"
+        with monkeypatch.context() as scope:
+            scope.setattr(executions, "EXECUTIONS_FILE", tmp_path / "foreign.db")
+            with pytest.raises(RuntimeError, match="switch profile"):
+                write()
+        assert not (tmp_path / "foreign.db").exists()
+        assert write() is True
+    assert executions.get_execution(execution_id)["status"] == "unknown"
+    assert executions._write_state.conn is None
+    assert executions._write_state.deadline is None
+
+
+@pytest.mark.parametrize("seam", ["BEGIN", "INSERT", "SELECT", "UPDATE", "COMMIT"])
+def test_shared_incident_writer_retries_without_duplicate_rows(monkeypatch, tmp_path, seam):
+    from cron import incidents
+
+    executions = _point_ledger(monkeypatch, tmp_path)
+    executions.create_execution("seed", source="builtin")
+    incidents.list_incidents()  # Initialise before injecting transaction faults.
+    real_connect = incidents._connect
+    failures = []
+
+    def fault(op):
+        if op == seam and not failures:
+            failures.append(op)
+            return True
+        return False
+
+    monkeypatch.setattr(incidents, "_connect", lambda: _FaultConnection(real_connect(), fault))
+    incident_id, is_new = incidents.upsert_incident("retry-job", "offline failure")
+    assert is_new is True
+    assert incidents.upsert_incident("retry-job", "offline failure") == (incident_id, False)
+    assert incidents.set_incident_state(incident_id, "alerted") is True
+    assert incidents.close_incidents_for_recovered_job("retry-job") == 1
+    assert failures == [seam]
+    assert len(incidents.list_incidents()) == 1
+    assert incidents.get_incident(incident_id)["state"] == "resolved"
+    assert executions._write_state.conn is None
+
+
+@pytest.mark.parametrize("invalidated", ["snapshot", "auto_rollback"])
+def test_statement_retry_refuses_invalidated_transactions(monkeypatch, tmp_path, invalidated):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    execution_id, write = _retry_writer_case(executions, monkeypatch, "give_up")
+    real_connect = executions._connect
+    attempts = []
+    real = real_connect()
+    error = sqlite3.OperationalError("database is locked")
+    if invalidated == "snapshot":
+        error.sqlite_errorcode = sqlite3.SQLITE_BUSY_SNAPSHOT
+
+    def fault(op):
+        if op == "UPDATE":
+            attempts.append(op)
+            if invalidated == "auto_rollback":
+                real.rollback()
+            raise error
+        return False
+
+    monkeypatch.setattr(executions, "_connect", lambda: _FaultConnection(real, fault))
+    with pytest.raises(sqlite3.OperationalError) as caught:
+        write()
+    assert caught.value is error
+    assert attempts == ["UPDATE"]
+    monkeypatch.setattr(executions, "_connect", real_connect)
+    assert executions.get_execution(execution_id)["status"] == "claimed"
+
+
+def test_schema_cache_invalidates_after_serial_replacement_and_schema_change(monkeypatch, tmp_path):
+    from cron import incidents
+
+    executions = _point_ledger(monkeypatch, tmp_path)
+    first = executions.create_execution("old", source="builtin")
+    incidents.upsert_incident("old", "offline")
+    path = executions._db_path()
+    old_fingerprint = executions._initialized_files[path]
+    moved = path.with_suffix(".preserved")
+    path.rename(moved)
+    replacement = executions.create_execution("new", source="builtin")
+    incidents.upsert_incident("new", "offline")
+    assert executions.get_execution(first["id"]) is None
+    assert executions.get_execution(replacement["id"]) is not None
+    assert executions._initialized_files[path] != old_fingerprint
+    assert [row["job_id"] for row in incidents.list_incidents()] == ["new"]
+    with sqlite3.connect(str(path)) as conn:
+        conn.execute("DROP INDEX idx_executions_occurrence")
+        conn.execute("DROP INDEX idx_cron_incidents_job")
+    executions.get_execution(replacement["id"])
+    incidents.list_incidents()
+    with sqlite3.connect(str(path)) as conn:
+        assert executions._schema_is_current(conn)
+        assert incidents._schema_is_current(conn)
 
 
 def test_execution_transitions_are_durable(monkeypatch, tmp_path):
@@ -47,6 +336,166 @@ def test_execution_can_be_loaded_by_exact_attempt_id(monkeypatch, tmp_path):
     assert executions.get_execution(first["id"]) == first
     assert executions.get_execution(second["id"]) == second
     assert executions.get_execution("missing") is None
+
+
+def test_current_schema_skips_first_touch_ddl(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    record = executions.create_execution("existing", source="builtin")
+    executions._initialized_files.clear()
+
+    def unexpected_initialize(_conn):
+        raise AssertionError("current schema must not run DDL on first process touch")
+
+    monkeypatch.setattr(executions, "_initialize_schema", unexpected_initialize)
+    assert executions.get_execution(record["id"]) == record
+
+
+def test_execution_writes_retry_sqlite_contention_without_blocking_reads(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    baseline = executions.create_execution("baseline", source="builtin")
+    db_path = str(executions.EXECUTIONS_FILE)
+    ready = tmp_path / "holder-ready"
+    release = tmp_path / "holder-release"
+    blocked = threading.Event()
+    done = threading.Event()
+    errors = []
+
+    holder_code = textwrap.dedent(
+        f"""
+        import pathlib, sqlite3, time
+        conn = sqlite3.connect({db_path!r})
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('BEGIN IMMEDIATE')
+        pathlib.Path({str(ready)!r}).write_text('1')
+        for _ in range(500):
+            if pathlib.Path({str(release)!r}).exists():
+                break
+            time.sleep(0.01)
+        conn.rollback()
+        conn.close()
+        """
+    )
+    from cron import incidents
+
+    real_connect = executions._connect
+
+    def observed_connect():
+        blocked.set()
+        return real_connect()
+
+    def write_execution():
+        try:
+            executions.create_execution("cross-process", source="builtin")
+            incidents.upsert_incident("cross-process", "boom")
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    monkeypatch.setattr(executions, "_connect", observed_connect)
+    holder = subprocess.Popen([sys.executable, "-c", holder_code])
+    writer = threading.Thread(target=write_execution)
+    try:
+        for _ in range(1000):
+            if ready.exists():
+                break
+            time.sleep(0.01)
+        assert ready.exists(), "holder never acquired SQLite's write lock"
+
+        writer.start()
+        assert blocked.wait(10), "writer never entered its contended connection"
+        assert not done.is_set(), "writer bypassed SQLite's write lock"
+
+        before = time.monotonic()
+        assert executions.get_execution(baseline["id"]) == baseline
+        assert time.monotonic() - before < 2.0
+    finally:
+        release.write_text("1")
+        holder.wait(timeout=15)
+        writer.join(timeout=15)
+
+    assert done.is_set(), "writer did not proceed after SQLite lock release"
+    assert errors == []
+    assert executions.latest_execution("cross-process") is not None
+    assert any(row["job_id"] == "cross-process" for row in incidents.list_incidents())
+
+    # Replacing the ledger under a live process invalidates the inode-keyed schema caches.
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        Path(db_path + suffix).unlink(missing_ok=True)
+    recreated = executions.create_execution("after-replace", source="builtin")
+    incidents.upsert_incident("after-replace", "boom")
+    assert executions.get_execution(recreated["id"]) is not None
+    assert any(row["job_id"] == "after-replace" for row in incidents.list_incidents())
+
+
+def test_delete_write_yields_after_closing_connection(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    events = []
+
+    class DeleteConnection:
+        def execute(self, sql, params=()):
+            if sql == "PRAGMA journal_mode":
+                return self
+            assert sql in {"BEGIN IMMEDIATE", "COMMIT"}
+            return None
+
+        def fetchone(self):
+            return ("delete",)
+
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setattr(executions.time, "sleep", lambda seconds: events.append(("sleep", seconds)))
+    with executions._serialized_write(
+        lambda: cast(sqlite3.Connection, DeleteConnection()),
+        threading.RLock(),
+        tmp_path / "executions.db",
+    ):
+        pass
+
+    assert events == ["close", ("sleep", executions._DELETE_WRITE_YIELD_SECONDS)]
+
+
+def test_write_retry_budget_is_shared_with_commit(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    clock = [0.0]
+
+    class ContendedCommit:
+        commit_calls = 0
+        closed = False
+
+        def execute(self, sql, params=()):
+            if sql == "PRAGMA journal_mode":
+                return self
+            if sql == "BEGIN IMMEDIATE":
+                clock[0] += 10.0
+                return None
+            if sql == "COMMIT":
+                self.commit_calls += 1
+                clock[0] += 6.0
+                raise sqlite3.OperationalError("database is locked")
+            if sql == "ROLLBACK":
+                return None
+            raise AssertionError(sql)
+
+        def fetchone(self):
+            return ("wal",)
+
+        def close(self):
+            self.closed = True
+
+    conn = ContendedCommit()
+    monkeypatch.setattr(executions.time, "monotonic", lambda: clock[0])
+    with __import__("pytest").raises(sqlite3.OperationalError):
+        with executions._serialized_write(
+            lambda: cast(sqlite3.Connection, conn),
+            threading.RLock(),
+            tmp_path / "executions.db",
+        ):
+            pass
+
+    assert conn.commit_calls == 1
+    assert conn.closed is True
 
 
 def test_fresh_external_handoff_is_not_recovered_before_worker_adopts(
@@ -139,11 +588,13 @@ def test_execution_ledger_follows_the_current_profile_home(monkeypatch, tmp_path
     from cron import executions
 
     current_home = {"path": tmp_path / "default"}
+    current_home["path"].mkdir()
     monkeypatch.setattr(executions, "EXECUTIONS_FILE", None)
     monkeypatch.setattr(executions, "get_hermes_home", lambda: current_home["path"])
 
     default_row = executions.create_execution("default-job", source="builtin")
     current_home["path"] = tmp_path / "worker"
+    current_home["path"].mkdir()
     worker_row = executions.create_execution("worker-job", source="builtin")
 
     assert executions.list_executions() == [worker_row]
@@ -249,6 +700,7 @@ def test_recovery_does_not_mark_live_process_execution_unknown(monkeypatch, tmp_
 def test_restart_marks_interrupted_execution_unknown_without_requeue(tmp_path):
     """Real temp-HERMES_HOME subprocess restart: in-flight is audit-only unknown."""
     home = tmp_path / "home"
+    home.mkdir()
     repo = Path(__file__).resolve().parents[2]
     env = os.environ.copy()
     env["HERMES_HOME"] = str(home)
