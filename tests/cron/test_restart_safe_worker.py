@@ -624,6 +624,25 @@ def test_launch_external_worker_degrades_by_default_with_real_helper(
     assert not (tmp_path / "cron/external-workers/exec-1.json").exists()
 
 
+def test_external_worker_uses_committed_dependency_interpreter(tmp_path, monkeypatch):
+    """A PM gateway uses a base Python with no third-party packages; its worker needs the committed venv."""
+    import cron.scheduler as scheduler
+    from tools.process_registry import GatewayChildDispatch
+
+    selected = tmp_path / "selected" / "venv"
+    monkeypatch.setattr(scheduler.sys, "prefix", scheduler.sys.base_prefix)
+    monkeypatch.setattr("pm.environments.committed_venv", lambda _root: selected)
+    monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "tools.process_registry.restart_safe_gateway_child_argv",
+        lambda command, **_: GatewayChildDispatch("degraded", command),
+    )
+    spawned, _payloads, _handoff, _get = _stub_external_worker_launch(scheduler, monkeypatch)
+    assert scheduler._launch_external_cron_worker({"id": "job-1", "execution_id": "exec-1"}) is True
+    from pm.environments import venv_python
+    assert spawned[0][0][0] == str(venv_python(selected))
+
+
 def test_launch_external_worker_pins_the_gateways_tree_on_pythonpath(
     tmp_path, monkeypatch,
 ):
