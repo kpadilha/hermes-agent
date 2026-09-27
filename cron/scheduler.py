@@ -3633,8 +3633,14 @@ def _launch_external_cron_worker(job: dict) -> bool:
     ack_path = handoff_dir / f"{execution_id}.ready"
     # Captured so a worker that dies before its acknowledgement can name the cause (#112729).
     stderr_path = handoff_dir / f"{execution_id}.stderr"
+    # A PM gateway runs on the bare toolchain Python; the external worker must
+    # start in the same committed dependency generation, not just inherit its cwd.
+    from pm.environments import committed_venv, venv_python
+    repo_root = Path(__file__).resolve().parent.parent
+    committed = committed_venv(repo_root) if sys.prefix == sys.base_prefix else None
+    worker_python = venv_python(committed) if committed is not None else Path(sys.executable)
     command = [
-        sys.executable,
+        str(worker_python),
         "-m",
         "cron.scheduler",
         "--external-worker-file",
@@ -3728,7 +3734,6 @@ def _launch_external_cron_worker(job: dict) -> bool:
     # dependency generation (#122222), and mark it so its own entry runs the PM dependency
     # boot. See cron/scheduler_worker_env.py and cron/worker_bootstrap.py.
     from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
-    repo_root = Path(__file__).resolve().parent.parent
     worker_env = pin_hermes_tree_on_pythonpath(worker_env, repo_root)
     worker_env[WORKER_MARKER] = "1"
     try:
