@@ -536,6 +536,34 @@ class TestEmojiVariationSelectorSuppression:
         assert result["findings"] == findings
 
 
+class TestPackageIntelLookupTimeout:
+    """A failed metadata lookup is telemetry, not an unattended approval gate."""
+
+    _INCOMPLETE = {"rule_id": "analysis_incomplete", "severity": "MEDIUM",
+                   "title": "Package threat intelligence could not be completed",
+                   "description": "ecosyste.ms metadata lookup deadline exhausted",
+                   "evidence": [{"type": "threat_intel", "source": "runtime-package-enrichment",
+                                 "threat_type": "lookup_incomplete"}]}
+
+    @pytest.mark.parametrize("findings, expected", [
+        ([_INCOMPLETE], "allow"),
+        ([_INCOMPLETE, {"rule_id": "typosquat", "severity": "HIGH"}], "warn"),
+        ([{"rule_id": "analysis_incomplete", "severity": "MEDIUM"}], "warn"),
+        ([dict(_INCOMPLETE, severity="HIGH")], "warn"),
+        ([dict(_INCOMPLETE, evidence=[{"type": "threat_intel", "source": "runtime-package-enrichment", "threat_type": "lookup_incomplete"}, {"type": "threat_intel", "source": "other"}])], "warn"),
+        ([_INCOMPLETE] * (_tirith_mod._MAX_FINDINGS + 1), "warn"),
+    ])
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._resolve_tirith_path", return_value="tirith")
+    @patch("tools.tirith_security._load_security_config")
+    def test_only_package_lookup_incomplete_is_nonblocking(self, mock_cfg, _mock_path, mock_run, findings, expected):
+        mock_cfg.return_value = _CFG
+        mock_run.return_value = _mock_run(2, _json_stdout(findings, "verification incomplete"))
+        result = check_command_security("uv pip install --dry-run memvid-sdk==2.0.159")
+        assert result["action"] == expected
+        assert result["findings"] == ([] if expected == "allow" else findings[:_tirith_mod._MAX_FINDINGS])
+
+
 class TestPrivateLanRawIpSuppression:
     """Raw private-IP warnings are suppressed only for read-only status probes."""
 
