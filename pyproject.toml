@@ -323,6 +323,8 @@ wake = [
   "sounddevice==0.5.5",
   "numpy==2.4.3",
 ]
+# Memvid snapshots run unattended; declare the SDK so PM rebuilds retain it.
+memvid = ["memvid-sdk==2.0.159"]
 # Platform sub-extras / alias extras — declared so pm.extras.ANCHORS names
 # only real extras (contract: tests/pm/test_extras.py). Each is
 # lazy-installed at first use via pm.ensure_import(name) and therefore
