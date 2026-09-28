@@ -354,9 +354,12 @@ def check_command_security(command: str) -> dict:
         logger.info("tirith circuit breaker closed after successful probe")
     # JSON enriches findings/summary; a parse failure never changes the verdict.
     findings, summary = [], ""
+    findings_truncated = False
     try:
         data = json.loads(result.stdout) if result.stdout.strip() else {}
-        findings = data.get("findings", [])[:_MAX_FINDINGS]
+        raw_findings = data.get("findings", [])
+        findings_truncated = len(raw_findings) > _MAX_FINDINGS
+        findings = raw_findings[:_MAX_FINDINGS]
         summary = (data.get("summary", "") or "")[:_MAX_SUMMARY_LEN]
     except (json.JSONDecodeError, AttributeError):
         logger.debug("tirith JSON parse failed, using exit code only")
@@ -371,6 +374,21 @@ def check_command_security(command: str) -> dict:
     if action == "warn" and findings and all(_is_emoji_variation_selector_finding(f) for f in findings) \
             and _has_only_emoji_presentation_selectors(command):
         return _verdict("allow")
+
+    # ponytail: metadata-service deadlines are not threat detections; keep all other findings blocking.
+    if action == "warn" and findings and not findings_truncated and all(
+        isinstance(f, dict) and f.get("rule_id") == "analysis_incomplete"
+        and f.get("severity", "").upper() == "MEDIUM"
+        and f.get("title") == "Package threat intelligence could not be completed"
+        and isinstance(f.get("evidence"), list) and f["evidence"] and all(
+            isinstance(e, dict) and e.get("type") == "threat_intel"
+            and e.get("source") == "runtime-package-enrichment"
+            and e.get("threat_type") == "lookup_incomplete"
+            for e in f["evidence"]
+        ) for f in findings
+    ):
+        logger.warning("Tirith package threat-intelligence lookup incomplete: %s", summary or findings)
+        return _verdict("allow", "Package threat-intelligence lookup incomplete (logged)")
 
     # LAN health/status probes are normal in local-first Hermes/Niko setups.
     # Tirith's raw-IP/private-network/plain-HTTP heuristics are useful for
