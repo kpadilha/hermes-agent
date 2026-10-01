@@ -124,8 +124,14 @@ def normalize_text(text: Any) -> str:
     return asciiish.lower()
 
 
+def _request_text(message: Any) -> str:
+    """Only the request, not repeated user-facing mode instructions, supplies topic evidence."""
+    text = _message_text(message) if isinstance(message, Mapping) else str(message or "")
+    return re.split(r"(?m)^PONYTAIL MODE ACTIVE\s*[—-]", text, maxsplit=1)[0].strip()
+
+
 def is_continuation_like(message: Any) -> bool:
-    text = normalize_text(message)
+    text = normalize_text(_request_text(message))
     if not text.strip():
         return False
     if any(re.search(pattern, text) for pattern in _CONTINUATION_PATTERNS):
@@ -154,11 +160,7 @@ def _message_topic_tokens(user_message: Any) -> set[str]:
     to enforce that the user actually said something about the resolved
     project's topic in this turn, not just hit a continuation regex.
     """
-    if isinstance(user_message, Mapping):
-        text = _message_text(user_message)
-    else:
-        text = str(user_message or "")
-    return _tokenize(text)
+    return _tokenize(_request_text(user_message))
 
 
 def _message_text(message: Mapping[str, Any]) -> str:
@@ -181,21 +183,8 @@ def build_seed_text(
     agent: Any = None,
     max_messages: int = 10,
 ) -> str:
-    parts = [str(user_message or "")]
-    if agent is not None:
-        for attr in ("_chat_name", "_chat_type", "_thread_id", "_gateway_session_key", "platform", "session_id"):
-            value = getattr(agent, attr, None)
-            if value:
-                parts.append(str(value))
-    for msg in list(conversation_history or [])[-max_messages:]:
-        if not isinstance(msg, Mapping):
-            continue
-        if msg.get("role") not in {"user", "assistant"}:
-            continue
-        text = _message_text(msg)
-        if text:
-            parts.append(text[:800])
-    return "\n".join(parts)
+    # ponytail: history and routing metadata may hint, but never vote as user topic.
+    return _request_text(user_message)
 
 
 def default_project_roots() -> list[Path]:
@@ -252,9 +241,9 @@ def load_project_contexts(roots: Iterable[Path] | None = None) -> list[ProjectCo
             status = meta.get("status", "")
             context_path = project_dir / "PROJECT_CONTEXT.md"
             context_text = _read_text(context_path) if context_path.exists() else ""
+            hub_text = _read_text(project_dir / "00-project-hub.md", 4000)
             meta_text = _read_text(project_dir / "meta" / "project.yaml", 4000)
-            # Include a shallow file/path inventory because artifact names often
-            # carry the strongest disambiguating signal.
+            # A hub describes the project; an arbitrary first 80 generated files do not.
             inventory: list[str] = []
             try:
                 for child in project_dir.rglob("*"):
@@ -267,7 +256,7 @@ def load_project_contexts(roots: Iterable[Path] | None = None) -> list[ProjectCo
                             break
             except OSError:
                 pass
-            text = "\n".join([slug, title, status, context_text, meta_text, "\n".join(inventory)])
+            text = "\n".join([slug, title, status, context_text, hub_text, meta_text, "\n".join(inventory)])
             contexts.append(
                 ProjectContext(
                     slug=slug,
@@ -283,24 +272,32 @@ def load_project_contexts(roots: Iterable[Path] | None = None) -> list[ProjectCo
 
 def _session_hint_slugs(agent: Any, seed_text: str) -> set[str]:
     db = getattr(agent, "_session_db", None) if agent is not None else None
-    if db is None:
+    session_id = getattr(agent, "session_id", None) if agent is not None else None
+    if db is None or not session_id:
         return set()
     tokens = list(_tokenize(seed_text))
     if not tokens:
         return set()
     # Prefer distinctive business/project terms over continuation boilerplate.
     tokens = sorted(tokens, key=lambda t: (t in {"inteligencia", "artificial", "negocio", "ensinar"}, len(t)), reverse=True)
-    query = " OR ".join(tokens[:8])
     slugs: set[str] = set()
     try:
-        matches = db.search_messages(query, role_filter=["user", "assistant"], limit=8, sort="newest")
+        row = db._read_one("SELECT session_key FROM sessions WHERE id = ?", (session_id,))
+        if not row or not row["session_key"]:
+            return set()  # No proven route: no cross-thread hint.
+        # ponytail: query within this route, not a global top-K that busy threads can crowd out.
+        clauses = " OR ".join("m.content LIKE ? ESCAPE '\\'" for _ in tokens[:8])
+        rows = db._read_all(
+            "SELECT m.content FROM messages m JOIN sessions s ON s.id = m.session_id "
+            "WHERE s.session_key = ? AND m.role IN ('user', 'assistant') "
+            "AND (m.active = 1 OR m.compacted = 1) AND (" + clauses + ") "
+            "ORDER BY m.timestamp DESC, m.id DESC LIMIT 8",
+            (row["session_key"], *("%" + t.replace("_", "\\_") + "%" for t in tokens[:8])),
+        )
     except Exception:
         return set()
-    for match in matches:
-        blob = "\n".join(str(match.get(k) or "") for k in ("snippet", "session_id", "source"))
-        for ctx in match.get("context") or []:
-            if isinstance(ctx, Mapping):
-                blob += "\n" + str(ctx.get("content") or "")
+    for match in rows:
+        blob = str(match["content"] or "")
         for m in re.finditer(r"research/projects/([a-zA-Z0-9_-]+)", blob):
             slugs.add(m.group(1))
         for m in re.finditer(r"\bproject:\s*([a-zA-Z0-9_-]+)", blob):
@@ -317,6 +314,7 @@ def score_project(
     seed_text: str,
     *,
     message_tokens: set[str] | None = None,
+    current_message: str = "",
     hinted_slugs: set[str] | None = None,
 ) -> tuple[float, str]:
     seed_tokens = _tokenize(seed_text)
@@ -328,6 +326,11 @@ def score_project(
     reasons = []
     if overlap:
         reasons.append("token overlap: " + ", ".join(sorted(overlap)[:12]))
+    # An explicit multiword project name in this turn beats generic DOCX/QA/history noise.
+    slug_phrase = " ".join(part for part in project.slug.split("-") if not part.isdigit())
+    if len(slug_phrase.split()) >= 3 and slug_phrase in normalize_text(current_message).replace("-", " "):
+        score += 6.0
+        reasons.append("exact project phrase in current turn")
     norm_seed = normalize_text(seed_text)
     norm_project = normalize_text(project.text)
     for phrase, weight in [
@@ -419,6 +422,9 @@ def resolve_active_topic(
         min_confidence = _DEFAULT_MIN_CONFIDENCE
     if min_topic_evidence is None:
         min_topic_evidence = _MIN_TOPIC_EVIDENCE_TOKENS
+    # ponytail: automated status notices carry IDs; inspect the card, don't guess a project.
+    if str(user_message or "").lstrip().startswith(("[kanban] Task ", "Cronjob Response:")):
+        return None
     if not is_continuation_like(user_message):
         return None
     seed_text = build_seed_text(user_message, conversation_history, agent=agent)
@@ -426,6 +432,7 @@ def resolve_active_topic(
     if not projects:
         return None
     message_tokens = _message_topic_tokens(user_message)
+    current_message = _request_text(user_message)
     hinted_slugs = _session_hint_slugs(agent, seed_text)
     scored = []
     for project in projects:
@@ -433,6 +440,7 @@ def resolve_active_topic(
             project,
             seed_text,
             message_tokens=message_tokens,
+            current_message=current_message,
             hinted_slugs=hinted_slugs,
         )
         scored.append((score, project, why))
@@ -528,12 +536,16 @@ def build_active_topic_context(
     *,
     agent: Any = None,
     project_roots: Iterable[Path] | None = None,
+    min_confidence: float | None = None,
+    min_topic_evidence: int | None = None,
 ) -> str:
     packet = resolve_active_topic(
         user_message,
         conversation_history,
         agent=agent,
         project_roots=project_roots,
+        min_confidence=min_confidence,
+        min_topic_evidence=min_topic_evidence,
     )
     if packet is None:
         return ""
