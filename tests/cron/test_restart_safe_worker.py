@@ -768,7 +768,7 @@ import pm.environments
 boots = []
 pm.environments.activate_dependencies = lambda root: boots.append("cron.jobs" in sys.modules)
 import cron
-print(json.dumps({"boots": boots, "marker": os.environ.get(sys.argv[1])}))
+print(json.dumps({"boots": boots, "marker": os.environ.get(sys.argv[1]), "lazy": os.environ.get("HERMES_DISABLE_LAZY_INSTALLS")}))
 """
 
 
@@ -782,7 +782,7 @@ def test_marked_worker_boots_dependencies_before_cron_jobs(marked):
     import cron.worker_bootstrap as worker_bootstrap
 
     repo_root = Path(worker_bootstrap.__file__).resolve().parent.parent
-    env = {k: v for k, v in os.environ.items() if k != worker_bootstrap.WORKER_MARKER}
+    env = {k: v for k, v in os.environ.items() if k not in (worker_bootstrap.WORKER_MARKER, "HERMES_DISABLE_LAZY_INSTALLS")}
     env["PYTHONPATH"] = str(repo_root)
     if marked:
         env[worker_bootstrap.WORKER_MARKER] = "1"
@@ -792,7 +792,8 @@ def test_marked_worker_boots_dependencies_before_cron_jobs(marked):
     )
     assert child.returncode == 0, child.stderr
     result = json.loads(child.stdout.strip().splitlines()[-1])
-    assert result == {"boots": [False] if marked else [], "marker": None}
+    assert result == {"boots": [False] if marked else [], "marker": None,
+                      "lazy": "1" if marked else None}
 
 
 _REAL_BOOT_PROBE = """
