@@ -40,6 +40,8 @@ def worker_bootstrap() -> None:
     """Run PM's dependency boot in the marked external worker, once."""
     if not os.environ.pop(WORKER_MARKER, None):
         return
+    # ponytail: an already-leased worker must not re-exec into bare Python on run_agent import.
+    os.environ["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
     from pm.environments import activate_dependencies
 
     activate_dependencies(Path(__file__).resolve().parent.parent)
