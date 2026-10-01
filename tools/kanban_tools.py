@@ -11,7 +11,10 @@ import functools
 import json
 import logging
 import os
+import subprocess
+import sys
 import time
+from pathlib import Path
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
@@ -722,6 +725,32 @@ def _handle_list(args: dict, **kw) -> str:
             "promoted": promoted})
 
 
+def _project_graph_completion_error(task, vault_root: Path = Path('/home/krishna/obsidian-vault/Krishna')) -> str | None:
+    """Reject a research writer's handoff while its project graph is disconnected."""
+    if not task or task.workspace_kind != 'dir' or not task.workspace_path:
+        return None
+    try:
+        rel = Path(task.workspace_path).resolve().relative_to(vault_root.resolve())
+    except ValueError:
+        return None
+    if len(rel.parts) < 4 or rel.parts[:3] != ('niko', 'research', 'projects'):
+        return None
+    project = rel.parts[3]
+    try:
+        # ponytail: reuse the canonical project check, not a second graph parser.
+        check = subprocess.run(
+            [sys.executable, str(vault_root / 'kb/kb_lint.py'), '--project-graph', project],
+            capture_output=True, text=True, timeout=30,
+            env={**os.environ, 'HOME': str(vault_root.parent.parent)},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f'Project graph validation unavailable: {exc}'
+    if check.returncode:
+        return (f'Project graph disconnected; connect the generated Markdown to its project hub '
+                f'and retry kanban_complete. {check.stdout.strip() or check.stderr.strip()[:700]}')
+    return None
+
+
 @_kanban_handler("kanban_complete")
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff."""
@@ -745,6 +774,9 @@ def _handle_complete(args: dict, **kw) -> str:
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
+        graph_error = _project_graph_completion_error(task)
+        if graph_error:
+            return tool_error(f'kanban_complete blocked: {graph_error} Task remains in-flight.')
         _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         try:
             ok = kb.complete_task(
