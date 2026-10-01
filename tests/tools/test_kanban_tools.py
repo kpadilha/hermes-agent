@@ -114,6 +114,44 @@ def test_list_filters_tasks(monkeypatch, worker_env):
     assert tenant_ids == [c]
 
 
+def test_project_graph_guidance_is_in_worker_prompt():
+    from agent.prompt_builder import KANBAN_GUIDANCE
+    assert 'Research project Markdown' in KANBAN_GUIDANCE
+    assert 'kanban_complete` rejects disconnected projects' in KANBAN_GUIDANCE
+
+
+def test_project_graph_completion_gate_blocks_orphans_and_ignores_other_workspaces(tmp_path):
+    from types import SimpleNamespace
+    from tools import kanban_tools as kt
+
+    vault = tmp_path / 'Krishna'
+    project = vault / 'niko/research/projects/sample'
+    project.mkdir(parents=True)
+    (vault / 'kb').mkdir()
+    (vault / 'kb/kb_lint.py').write_text(
+        "import sys\nsys.exit(1 if sys.argv[1:] == ['--project-graph', 'sample'] else 0)\n",
+        encoding='utf-8',
+    )
+    task = SimpleNamespace(workspace_kind='dir', workspace_path=str(project))
+    assert 'project graph' in kt._project_graph_completion_error(task, vault).lower()
+    assert kt._project_graph_completion_error(
+        SimpleNamespace(workspace_kind='dir', workspace_path=str(tmp_path / 'elsewhere')), vault
+    ) is None
+    (vault / 'kb/kb_lint.py').write_text(
+        f"import os,sys\nsys.exit(0 if os.environ['HOME'] == {str(vault.parent.parent)!r} else 1)\n",
+        encoding='utf-8',
+    )
+    assert kt._project_graph_completion_error(task, vault) is None
+
+
+def test_complete_rejects_project_graph_error_without_closing(worker_env, monkeypatch):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kt, '_project_graph_completion_error', lambda task: 'Project graph disconnected')
+    out = kt._handle_complete({'summary': 'done'})
+    assert 'Project graph disconnected' in out
+    assert json.loads(kt._handle_show({}))['task']['status'] == 'running'
+
+
 def test_complete_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_complete({
