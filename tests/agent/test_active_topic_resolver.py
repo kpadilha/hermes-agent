@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agent.active_topic_resolver import (
     build_active_topic_context,
+    load_project_contexts,
     is_continuation_like,
     resolve_active_topic,
 )
@@ -19,6 +20,93 @@ def _write_project(root: Path, slug: str, title: str, context: str) -> Path:
     )
     (project / "PROJECT_CONTEXT.md").write_text(context, encoding="utf-8")
     return project
+
+
+def test_cross_session_hint_is_scoped_to_same_thread(tmp_path: Path):
+    from types import SimpleNamespace
+    from hermes_state import SessionDB
+    from agent.active_topic_resolver import _session_hint_slugs
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("same-old", "discord", session_key="thread-A", chat_id="A", thread_id="A")
+        db.create_session("same-new", "discord", session_key="thread-A", chat_id="A", thread_id="A")
+        db.create_session("other", "discord", session_key="thread-B", chat_id="B", thread_id="B")
+        db.append_message("same-old", "assistant", "identity research/projects/agentic-identity-patterns")
+        for _ in range(45):
+            db.append_message("other", "assistant", "identity research/projects/machine-identity-dispatcher")
+        agent = SimpleNamespace(_session_db=db, session_id="same-new")
+        hints = _session_hint_slugs(agent, "identity")
+        assert "agentic-identity-patterns" in hints
+        assert "machine-identity-dispatcher" not in hints
+    finally:
+        db.close()
+
+
+def test_ponytail_instructions_do_not_supply_topic_evidence(tmp_path: Path):
+    root = tmp_path / "projects"
+    _write_project(root, "persistent-memory", "Persistent memory", "project workflow code agent memory security identity source artifact report test")
+    _write_project(root, "different-topic", "Gardening", "orchids and soil")
+    message = (
+        "Vamos\n\nPONYTAIL MODE ACTIVE — level: full\n"
+        "The lazy senior developer sees project workflow code, agent, memory, "
+        "security, identity, source, artifact, report and test."
+    )
+    assert resolve_active_topic(message, project_roots=[root]) is None
+
+
+def test_history_cannot_make_generic_current_words_choose_a_project(tmp_path: Path):
+    root = tmp_path / "projects"
+    _write_project(root, "alpha-project", "Alpha project", "report governance atlas boreal oldtopic unique history terms")
+    _write_project(root, "beta-project", "Beta project", "report governance atlas boreal")
+    history = [{"role": "assistant", "content": "oldtopic unique history terms about alpha project"}]
+    assert resolve_active_topic("vamos continuar com report governance atlas boreal", history, project_roots=[root]) is None
+
+
+def test_explicit_project_slug_phrase_beats_generic_artifact_overlap(tmp_path: Path):
+    root = tmp_path / "projects"
+    _write_project(root, "sailpoint-isc-human-actor", "SailPoint ISC human actor", "DOCX PDF TOC workflow companion corrections")
+    _write_project(root, "agentic-identity-patterns-2026-09-30", "Agentic Identity Patterns", "seven surfaces")
+    packet = resolve_active_topic(
+        "continuar as correções do Agentic Identity Patterns workflow companion",
+        [{"role": "assistant", "content": "DOCX PDF TOC corrections"}],
+        project_roots=[root],
+    )
+    assert packet is not None and packet.project_slug == "agentic-identity-patterns-2026-09-30"
+
+
+def test_automated_kanban_notification_does_not_infer_project(tmp_path: Path):
+    root = tmp_path / "projects"
+    _write_project(root, "other-project", "Other project", "AIP Kanban DOCX PDF QA workflows completed")
+    message = (
+        "[kanban] Task t_a228c761 completed. Title: AIP-T27 workflow QA. "
+        "Board: niko-research. Check the result or decide the next step."
+    )
+    assert resolve_active_topic(message, [{"role": "assistant", "content": "Other project is active"}], project_roots=[root]) is None
+    assert resolve_active_topic("Cronjob Response: Next steps for AIP workflow", [], project_roots=[root]) is None
+
+
+def test_project_hub_is_indexed_before_noisy_artifact_inventory(tmp_path: Path):
+    root = tmp_path / "projects"
+    project = _write_project(root, "agentic-identity-patterns", "Agentic Identity Patterns", "")
+    (project / "00-project-hub.md").write_text(
+        "# Agentic Identity Patterns\nDelegation workflow and seven control surfaces.\n", encoding="utf-8"
+    )
+    noise = project / "diagrams"
+    noise.mkdir()
+    for i in range(85):
+        (noise / f"image-{i:03d}.png").write_bytes(b"x")
+    ctx = next(p for p in load_project_contexts([root]) if p.slug == "agentic-identity-patterns")
+    assert "Delegation workflow and seven control surfaces" in ctx.text
+
+
+def test_tunable_thresholds_are_forwarded_by_builder(tmp_path: Path):
+    root = tmp_path / "projects"
+    _write_project(root, "machine-identity", "Machine identity", "Workload identity and delegation")
+    assert build_active_topic_context(
+        "continuar com workload identity e delegation", project_roots=[root],
+        min_confidence=0.0, min_topic_evidence=1,
+    ).startswith("<active_topic_context>")
 
 
 def test_continuation_like_portuguese_focus_prompt():
