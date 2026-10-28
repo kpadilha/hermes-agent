@@ -17,6 +17,21 @@ def test_pre_tool_call_receives_session_workspace(tmp_path, monkeypatch):
     assert seen["cwd"] == str(tmp_path)
 
 
+def test_failed_workspace_lookup_still_runs_policy_hooks(monkeypatch):
+    def _boom(task_id="default"):
+        raise RuntimeError("lookup failed")
+
+    monkeypatch.setattr("tools.file_tools_paths._authoritative_workspace_root", _boom)
+    monkeypatch.setattr(
+        "hermes_cli.plugins.invoke_hook",
+        lambda hook, **kw: [{"action": "block", "message": f"cwd={kw['cwd']}"}],
+    )
+    from hermes_cli.plugins import _dispatch_pre_tool_call_hooks
+
+    block, _ = _dispatch_pre_tool_call_hooks("write_file", {"path": "a.txt"}, task_id="t")
+    assert block == "cwd=None"
+
+
 def test_pre_llm_call_receives_session_workspace(tmp_path, monkeypatch):
     seen: dict = {}
     monkeypatch.setattr(
