@@ -845,7 +845,7 @@ def _collect_pre_llm_call_context(
         logger.warning("active topic resolver failed: %s", exc, exc_info=True)
     try:
         from hermes_cli.lifecycle import invoke_hook as _invoke_hook
-        from tools.file_tools_paths import _authoritative_workspace_root
+        from tools.file_tools_paths import hook_workspace_root
         _pre_results = _invoke_hook(
             "pre_llm_call",
             session_id=agent.session_id,
@@ -859,7 +859,7 @@ def _collect_pre_llm_call_context(
             parent_session_id=getattr(agent, "_parent_session_id", None) or "",
             sender_id=getattr(agent, "_user_id", None) or "",
             # The session's workspace, not the process cwd: hooks must know which checkout is touched.
-            cwd=_authoritative_workspace_root(effective_task_id),
+            cwd=hook_workspace_root(effective_task_id),
         )
         try:
             # Spill oversized per-hook context to disk so a runaway plugin can't inflate every subsequent
