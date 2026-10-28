@@ -144,6 +144,18 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
     return recorded or _registered_task_cwd_override(task_id) or _configured_terminal_cwd()
 
 
+def hook_workspace_root(task_id: str = "default") -> str | None:
+    """``_authoritative_workspace_root`` for hook payloads; never raises.
+
+    The value is advisory, so a failed lookup must not stop policy hooks from running.
+    """
+    try:
+        return _authoritative_workspace_root(task_id)
+    except Exception:
+        logger.warning("hook workspace root lookup failed", exc_info=True)
+        return None
+
+
 def _host_text(text: str, container_paths: bool) -> str:
     """Expand ``~``; on host backends also translate Git Bash ``/c/Users/...`` drive
     paths before Path sees them. Container/WSL Linux paths are never rewritten."""

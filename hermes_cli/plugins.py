@@ -1920,12 +1920,12 @@ def _get_pre_tool_call_directive_details(
         fmt = getattr(_thread_tool_whitelist, "fmt", "Tool '{tool_name}' denied")
         return _PreToolCallDirective(action="block", message=fmt.format(tool_name=tool_name))
     from hermes_cli.lifecycle import invoke_hook as invoke_lifecycle_hook
-    from tools.file_tools_paths import _authoritative_workspace_root
+    from tools.file_tools_paths import hook_workspace_root
     hook_results = invoke_lifecycle_hook(
         "pre_tool_call", tool_name=tool_name, args=args if isinstance(args, dict) else {},
         task_id=task_id, session_id=session_id, tool_call_id=tool_call_id, turn_id=turn_id,
         api_request_id=api_request_id, middleware_trace=list(middleware_trace or []),
-        cwd=_authoritative_workspace_root(task_id))  # session workspace, not the process cwd
+        cwd=hook_workspace_root(task_id))  # session workspace, not the process cwd
     modified_args: Optional[dict[str, Any]] = None
     first_approve: Optional[tuple[Optional[str], Optional[str]]] = None  # (message, rule_key)
     for result in hook_results:
