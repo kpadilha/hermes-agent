@@ -786,14 +786,28 @@ def revoke(command: str) -> int:
 
 
 _SCRIPT_EXTENSIONS: tuple[str, ...] = (".sh", ".bash", ".zsh", ".fish", ".py", ".pyw", ".rb", ".pl", ".lua", ".js", ".mjs", ".cjs", ".ts")
+_ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _program_index(argv: list[str]) -> int:
+    """Index of the program a leading ``env NAME=value ...`` runs; 0 without that prefix."""
+    if not argv or os.path.basename(argv[0]) != "env":
+        return 0
+    i = 1
+    while i < len(argv) and _ENV_ASSIGNMENT.match(argv[i]):
+        i += 1
+    return i if i < len(argv) else 0
 
 
 def _command_script_path(command: str) -> str:
-    """First token with a script extension, else the first path-like token, else the first token."""
+    """First token with a script extension, else the first path-like token, else the first token.
+
+    Tokens of a leading ``env`` prefix are skipped: ``PATH=/a:/b`` is not the script."""
     try:
         parts = split_command_line(command) or [command]
     except ValueError:
         return command
+    parts = parts[_program_index(parts):]
     return (next((p for p in parts if p.lower().endswith(_SCRIPT_EXTENSIONS)), None)
             or next((p for p in parts if "/" in p or p.startswith("~")), None) or parts[0])
 
@@ -833,7 +847,7 @@ def script_is_executable(command: str) -> bool:
         argv = split_command_line(command) if path and os.path.isfile(expanded) else None
     except ValueError:
         return False
-    return argv is not None and os.access(expanded, os.X_OK if argv and argv[0] == path else os.R_OK)
+    return argv is not None and os.access(expanded, os.X_OK if argv and argv[_program_index(argv)] == path else os.R_OK)
 
 
 def run_once(spec: ShellHookSpec, kwargs: dict[str, Any]) -> dict[str, Any]:

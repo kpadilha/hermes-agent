@@ -745,3 +745,19 @@ def test_unroutable_script_hook_names_the_remediation(tmp_path):
 
     assert result["returncode"] is None
     assert "interpreter" in result["error"] and "bash" in result["error"]
+
+
+def test_env_prefixed_hook_resolves_its_script_not_the_assignment(tmp_path):
+    """An ``env PATH=a:b VAR=x <script>`` hook is tracked by the script's mtime, not a PATH entry."""
+    script = _write_script(tmp_path, "context-hook", "#!/bin/sh\nexit 0\n")
+    command = f"env PATH=/opt/bin:/usr/bin HOOK_FORMAT=json {script}"
+    assert shell_hooks.script_mtime_iso(command) == shell_hooks.script_mtime_iso(str(script)) is not None
+
+
+def test_env_prefixed_hook_needs_the_exec_bit_env_runs_it_with(tmp_path):
+    """``env`` execs the script directly, so the doctor must require X_OK, not R_OK."""
+    script = _write_script(tmp_path, "context-hook", "#!/bin/sh\nexit 0\n")
+    command = f"env PATH=/opt/bin:/usr/bin {script}"
+    assert shell_hooks.script_is_executable(command)
+    script.chmod(0o644)
+    assert not shell_hooks.script_is_executable(command)
