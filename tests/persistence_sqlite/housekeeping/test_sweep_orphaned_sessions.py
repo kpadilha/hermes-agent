@@ -94,6 +94,19 @@ def _make_session(
 
 
 class TestSweepOrphanedSessions:
+    def test_auto_maintenance_reaps_only_unkeyed_api_sessions(self, store, db, maintain):
+        stale = time.time() - 100 * 86400
+        for sid, session_key in (("api-unkeyed", None), ("api-keyed", "client-conversation")):
+            create_session(db, sid, source="api_server", session_key=session_key)
+            _backdate_session(db, sid, stale)
+            _set_last_activity(db, sid, stale)
+
+        result = maintain(store, retention_days=90, min_interval_hours=0, vacuum=False)
+
+        assert result["closed"] == 1
+        assert get_session(db, "api-unkeyed")["end_reason"] == "startup_orphan_reap"
+        assert get_session(db, "api-keyed")["ended_at"] is None
+
     def test_stale_tui_session_swept(self, store, db):
         stale = time.time() - 8 * 3600
         _make_session(db, "stale-tui", source="tui", started_at=stale, message_at=stale)

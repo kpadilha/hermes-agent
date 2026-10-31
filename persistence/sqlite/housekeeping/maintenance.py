@@ -294,6 +294,7 @@ class SQLiteSessionMaintenance(SessionPortability):
     def sweep_orphaned_sessions(
         self, *, max_idle_seconds: float, sources: tuple[str, ...] = ("tui", "desktop", "subagent"),
         exclude_ids: tuple[str, ...] = (), exclude_pinned: bool = False,
+        exclude_keyed_api_sessions: bool = False,
         heartbeat_staleness_seconds: Optional[float] = None,
         heartbeat_ownership_grace_seconds: Optional[float] = None, respect_gateway_heartbeats: bool = True,
     ) -> tuple[SessionId, ...]:
@@ -313,7 +314,11 @@ class SQLiteSessionMaintenance(SessionPortability):
             orphan_predicate += (" AND NOT EXISTS (SELECT 1 FROM gateway_heartbeats h WHERE"
                                  " h.last_heartbeat >= ? AND h.started_at <= sessions.started_at + ?)")
             heartbeat_params = (now - hb_staleness, hb_grace)
-        scope_sql = f" AND source IN ({_placeholders(srcs)}){pin_scope} AND {orphan_predicate}"
+        api_key_scope = (
+            " AND (source != 'api_server' OR NULLIF(TRIM(session_key), '') IS NULL)"
+            if exclude_keyed_api_sessions else ""
+        )
+        scope_sql = f" AND source IN ({_placeholders(srcs)}){pin_scope}{api_key_scope} AND {orphan_predicate}"
         scope_params = (*srcs, cutoff, cutoff, *heartbeat_params)
         def _do(conn):
             rows = conn.execute(f"SELECT id FROM sessions WHERE ended_at IS NULL{scope_sql}",

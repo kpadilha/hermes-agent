@@ -214,6 +214,7 @@ def run_auto_prune_and_vacuum(
         closed = store.maintenance.sweep_orphaned_sessions(
             max_idle_seconds=float(retention_days) * 86400.0,
             sources=AUTO_PRUNE_STALE_OPEN_SOURCES, exclude_pinned=True,
+            exclude_keyed_api_sessions=True,
             respect_gateway_heartbeats=False,  # state-owned lifecycles, not gateway heartbeats
         )
         result["closed"] = len(closed)
