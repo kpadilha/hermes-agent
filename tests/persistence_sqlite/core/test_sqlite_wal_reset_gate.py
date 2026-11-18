@@ -65,13 +65,13 @@ class TestApplyWalWalResetGate:
         self, tmp_path, monkeypatch
     ):
         monkeypatch.setattr(
-            hermes_state_wal, "is_sqlite_wal_reset_vulnerable", lambda version_info=None: True
+            sqlite_support, "is_sqlite_wal_reset_vulnerable", lambda version_info=None: True
         )
         conn = sqlite3.connect(str(tmp_path / "existing-delete.db"))
         conn.execute("CREATE TABLE t (x INTEGER)")
         conn.commit()
         monkeypatch.setattr(
-            hermes_state_wal,
+            sqlite_support,
             "_set_journal_mode_no_wait",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("DELETE mode must not be set when already active")
